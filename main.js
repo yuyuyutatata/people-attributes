@@ -1,4 +1,4 @@
-// ===== main.js (hybrid unique: hash if available, else track-once) =====
+// ===== main.js (確実加算・即時描画・デバッグ付き) =====
 const video   = document.getElementById('video');
 const overlay = document.getElementById('overlay');
 const ctx     = overlay.getContext('2d');
@@ -10,17 +10,27 @@ const statusEl= document.getElementById('status');
 const tbody   = document.getElementById('tbody');
 const logEl   = document.getElementById('log');
 
-// ---- parameters (緩め設定) ----
-const SITE_SECRET      = 'CHANGE_ME_TO_RANDOM_32CHARS';
-const MATCH_PIX        = 90;     // 追跡の許容距離
-const MIN_BOX          = 70;     // 顔の最小サイズ（小さ過ぎると不安定）
-const MIN_SCORE        = 0.05;   // 顔品質しきい値（かなり緩め）
-const COUNT_DELAY_MS   = 800;    // 連続滞在がこの時間を超えたらトラックで1回カウント
-const STABLE_FRAMES    = 5;      // 埋め込みの安定判定に使う最小フレーム
-const COS_THRESHOLD    = 0.975;  // 埋め込みの連続類似度
-const TARGET_FPS       = 12;     // 推論頻度（約12fps）
+// 画面下に“今日のユニーク合計”表示を追加（index.html に要 <div id="total"></div>）
+let totalEl = document.getElementById('total');
+if (!totalEl) {
+  totalEl = document.createElement('div');
+  totalEl.id = 'total';
+  totalEl.style.marginTop = '8px';
+  totalEl.style.fontSize = '14px';
+  document.body.appendChild(totalEl);
+}
 
-// ---- Human init ----
+// ---- パラメータ ----
+const SITE_SECRET      = 'CHANGE_ME_TO_RANDOM_32CHARS';
+const MATCH_PIX        = 90;
+const MIN_BOX          = 70;
+const MIN_SCORE        = 0.05;
+const COUNT_DELAY_MS   = 800;   // フォールバック加算の滞在時間
+const STABLE_FRAMES    = 5;     // 埋め込み安定判定
+const COS_THRESHOLD    = 0.975; // 類似度しきい値
+const TARGET_FPS       = 12;    // 推論間引き
+
+// ---- Human ----
 const human = new Human.Human({
   modelBasePath: 'https://cdn.jsdelivr.net/npm/@vladmandic/human/models',
   face: {
@@ -33,7 +43,7 @@ const human = new Human.Human({
   body: { enabled: false }, hand: { enabled: false }, gesture: { enabled: false },
 });
 
-// ---- date & unique set (day-scoped) ----
+// ---- 日付 & ユニーク管理 ----
 function todayStr(){
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
@@ -41,15 +51,10 @@ function todayStr(){
 const uniqKey = () => `uniqHashes:${todayStr()}`;
 let uniqSet = new Set(JSON.parse(localStorage.getItem(uniqKey()) || '[]'));
 function saveUniq(){ localStorage.setItem(uniqKey(), JSON.stringify([...uniqSet])); }
-setInterval(()=>{
-  // 日付跨ぎでリセット
-  const k = uniqKey();
-  if (!localStorage.getItem(k)) { uniqSet = new Set(); saveUniq(); }
-}, 60*1000);
 
-// ---- table (last 1 min) ----
+// ---- テーブル（直近1分）----
 const buckets = ['child','10s','20s','30s','40s','50s','60s+','unknown'];
-const minuteCounts = {}; for (const b of buckets) minuteCounts[b] = { male:0, female:0, unknown:0 };
+const minuteCounts = {}; resetMinute();
 function toBucket(age){
   if (!(age > 0)) return 'unknown';
   if (age < 13) return 'child';
@@ -65,12 +70,21 @@ function renderTable(){
     const c = minuteCounts[b];
     return `<tr><td>${b}</td><td>${c.male}</td><td>${c.female}</td><td>${c.unknown}</td></tr>`;
   }).join('');
+  // 今日のユニーク合計
+  totalEl.textContent = `今日のユニーク合計: ${uniqSet.size} 人`;
 }
-function resetMinute(){ for (const b of buckets) minuteCounts[b]={male:0,female:0,unknown:0}; renderTable(); }
-renderTable();
-setInterval(resetMinute, 60*1000);
+function resetMinute(){
+  for (const b of buckets) minuteCounts[b] = { male:0, female:0, unknown:0 };
+  renderTable();
+}
+setInterval(()=>{
+  // 日またぎ検知（キーが変わると localStorage のキーも変わる）
+  const k = uniqKey();
+  if (!localStorage.getItem(k)) { uniqSet = new Set(); saveUniq(); }
+  resetMinute();
+}, 60*1000);
 
-// ---- utils ----
+// ---- ユーティリティ ----
 function cosineSim(a,b){
   let dot=0,na=0,nb=0; const n=Math.min(a.length,b.length);
   for (let i=0;i<n;i++){ const x=a[i],y=b[i]; dot+=x*y; na+=x*x; nb+=y*y; }
@@ -86,11 +100,11 @@ async function hashEmbedding(emb){
   const payload = JSON.stringify({ r: rounded, d: todayStr(), s: SITE_SECRET, v:3 });
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
   const dv  = new DataView(buf); let out='';
-  for (let i=0;i<16;i++) out += dv.getUint8(i).toString(16).padStart(2,'0'); // 32桁
+  for (let i=0;i<16;i++) out += dv.getUint8(i).toString(16).padStart(2,'0');
   return out;
 }
 
-// ---- simple tracker (position-based) ----
+// ---- 簡易トラッカー ----
 let nextId=1;
 const tracks = new Map(); // id -> {cx,cy,firstSeen,lastSeen,counted,embBuf,gender,bucket,age}
 function assignTrack(face){
@@ -113,7 +127,7 @@ function purgeOld(){
   for (const [id,t] of tracks){ if (now - t.lastSeen > 4000) tracks.delete(id); }
 }
 
-// ---- loop ----
+// ---- ループ ----
 let running=false, stream=null, rafId=null, lastTick=0;
 const frameGap = Math.max(1000/TARGET_FPS, 60);
 
@@ -127,13 +141,22 @@ async function startCamera(){
   overlay.width = video.videoWidth  || 640;
   overlay.height= video.videoHeight || 480;
   running=true; btnStart.disabled=true; btnStop.disabled=false;
-  statusEl.textContent='実行中（ハイブリッドユニーク）';
+  statusEl.textContent='実行中（ユニーク集計）';
   loop();
 }
 function stopCamera(){
   running=false; if (rafId) cancelAnimationFrame(rafId);
   if (stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
   btnStart.disabled=false; btnStop.disabled=true; statusEl.textContent='停止';
+}
+
+function addCount(bucket, gkey) {
+  // バケット/性別が不正なら unknown に寄せる
+  const b = buckets.includes(bucket) ? bucket : 'unknown';
+  const g = (gkey==='male' || gkey==='female') ? gkey : 'unknown';
+  minuteCounts[b][g] += 1;
+  console.log(`[COUNT] +1  bucket=${b}, gender=${g}`);
+  renderTable(); // ★ 即時描画
 }
 
 async function loop(ts){
@@ -152,43 +175,44 @@ async function loop(ts){
     const id=assignTrack(f);
     const t = tracks.get(id);
 
-    // 属性
+    // 属性（オーバレイ用 & 集計キー）
     const gender=(f.gender||'unknown').toLowerCase();
     const gscore=f.genderScore ?? 0;
     t.gender = (gscore>0.6) ? (gender.startsWith('f')?'female':'male') : 'unknown';
     t.age    = typeof f.age==='number' ? Math.round(f.age) : null;
     t.bucket = toBucket(t.age);
 
-    // 1) まずハッシュが作れるなら「日内ユニーク」で加算
+    // 1) ハッシュ（取れれば）で日内ユニーク加算
     const emb = f.descriptor || f.embedding || f.descriptorRaw || null;
     if (!t.counted && emb && w>=MIN_BOX && h>=MIN_BOX && q>=MIN_SCORE){
       t.embBuf.push(emb);
       const recent = t.embBuf.slice(-STABLE_FRAMES);
       if (recent.length >= STABLE_FRAMES){
-        // 連続の安定確認
         let ok=true; for (let i=1;i<recent.length;i++){ if (cosineSim(recent[i-1],recent[i]) < COS_THRESHOLD){ ok=false; break; } }
         if (ok){
           const mean = meanVec(recent);
           const hsh  = await hashEmbedding(mean);
           if (!uniqSet.has(hsh)){
             uniqSet.add(hsh); saveUniq();
-            minuteCounts[t.bucket][t.gender] += 1;
+            addCount(t.bucket, t.gender);  // ★ ここで即時加算
+          } else {
+            console.log('[SKIP] already seen hash today');
           }
           t.counted = true;
         }
       }
     }
 
-    // 2) ハッシュが取れない/安定しない場合のフォールバック（トラック1回）
+    // 2) ハッシュ取れない/安定しない場合のフォールバック（滞在で1回）
     if (!t.counted){
       const dwell = performance.now() - t.firstSeen;
       if (dwell >= COUNT_DELAY_MS && w>=MIN_BOX && h>=MIN_BOX && q>=MIN_SCORE){
-        minuteCounts[t.bucket][t.gender] += 1; // 出現1回として加算
+        addCount(t.bucket, t.gender);     // ★ ここで即時加算
         t.counted = true;
       }
     }
 
-    // 描画
+    // 枠とラベル
     ctx.lineWidth=2;
     ctx.strokeStyle = t.counted ? '#00FF88' : '#3fa9f5';
     ctx.strokeRect(x,y,w,h);
@@ -200,6 +224,7 @@ async function loop(ts){
   }
 
   purgeOld();
+  // 周期描画（保険）
   renderTable();
   const fps = (1000 / (performance.now() - lastTick + 1)).toFixed(1);
   logEl.textContent = `faces: ${faces.length} | tracks: ${tracks.size} | FPS approx: ${fps}`;
