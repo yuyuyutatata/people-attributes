@@ -30,7 +30,7 @@ const STABLE_FRAMES    = 5;     // 埋め込み安定判定
 const COS_THRESHOLD    = 0.975; // 類似度しきい値
 const TARGET_FPS       = 12;    // 推論間引き
 
-// ---- Human ----
+// ==== 修正版 main.js（モデルロード保証）====
 const human = new Human.Human({
   modelBasePath: 'https://cdn.jsdelivr.net/npm/@vladmandic/human/models',
   face: {
@@ -42,6 +42,17 @@ const human = new Human.Human({
   filter: { enabled: true, equalization: true },
   body: { enabled: false }, hand: { enabled: false }, gesture: { enabled: false },
 });
+
+async function ensureModelsLoaded() {
+  console.log('Loading Human models...');
+  await human.load();
+  await human.warmup();
+  const v = await human.validate();
+  console.log('Model validation result:', v);
+  if (!v.face) console.error('❌ Face model failed to load');
+  else console.log('✅ Face model ready');
+}
+
 
 // ---- 日付 & ユニーク管理 ----
 function todayStr(){
@@ -132,7 +143,7 @@ let running=false, stream=null, rafId=null, lastTick=0;
 const frameGap = Math.max(1000/TARGET_FPS, 60);
 
 async function startCamera(){
-  await human.load(); await human.warmup(); // モデル確実ロード
+  await ensureModelsLoaded();  
   const facing = ckFront.checked ? 'user' : 'environment';
   stream = await navigator.mediaDevices.getUserMedia({
     video:{facingMode:{ideal:facing}, width:{ideal:640}, height:{ideal:480}}, audio:false
