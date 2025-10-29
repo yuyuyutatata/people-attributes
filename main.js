@@ -28,7 +28,7 @@ const SITE_SECRET   = 'CHANGE_ME_TO_RANDOM_32CHARS';
 const TARGET_FPS    = 12;
 const STABLE_FRAMES = 5;
 const COS_THRESHOLD = 0.975;
-const COUNT_DELAY_MS= 800;     // 滞在で1回カウント
+const COUNT_DELAY_MS = 400;   // 0.4秒でカウント（以前: 600〜800）
 const MATCH_PIX     = 220;
 const IOU_THRESH    = 0.10;
 const PURGE_MS      = 4000;
@@ -203,14 +203,28 @@ async function loop(ts){
       }
     }
 
-    // 2) フォールバック（モデル未ロード時は条件なしで 0.8s 滞在したら必ず1回）
-    if (!t.counted) {
-      const dwell = performance.now() - t.firstSeen;
-      if (dwell >= COUNT_DELAY_MS) {
-        addCount(t.bucket, t.gender); // bucketもgenderもunknownのままでOK
-        t.counted = true;
-      }
-    }
+    // 2) フォールバック：モデル未ロード/不安定時は「必ず」1回カウント
+if (!t.counted) {
+  // 初回フレームで armedAt をセット
+  if (!t.armedAt) t.armedAt = t.firstSeen;
+
+  const dwell = performance.now() - t.armedAt;
+
+  // ★ 顔が映って 0.4 秒経過したら、unknown として必ず +1
+  if (USE_FALLBACK_ONLY && dwell >= COUNT_DELAY_MS) {
+    addCount(t.bucket, t.gender); // ほぼ 'unknown','unknown' になる
+    t.counted = true;
+    console.log(`[FB] counted after ${Math.round(dwell)}ms`);
+  }
+
+  // ★ モデルは生きているが埋め込みが得られないときも救済
+  if (!USE_FALLBACK_ONLY && dwell >= (COUNT_DELAY_MS + 200)) {
+    addCount(t.bucket, t.gender);
+    t.counted = true;
+    console.log(`[FB2] counted without embedding after ${Math.round(dwell)}ms`);
+  }
+}
+
 
     // 枠・ラベル
     ctx.lineWidth=2;
