@@ -37,11 +37,15 @@ const MIN_SCORE     = 0.05;
 
 // ------- Human -------
 const human = new Human.Human({
-  modelBasePath: 'https://cdn.jsdelivr.net/npm/@vladmandic/human@3.6.0/models',
-  face: { detector:{rotation:true,maxDetected:5}, mesh:false, iris:false,
-          description:{enabled:true}, descriptor:{enabled:true} },
-  filter:{enabled:true,equalization:true},
-  body:{enabled:false}, hand:{enabled:false}, gesture:{enabled:false},
+  modelBasePath: './models',
+  face: {
+    detector: { rotation: true, maxDetected: 5 },
+    mesh: false, iris: false,
+    description: { enabled: true },
+    descriptor:  { enabled: true },
+  },
+  filter: { enabled: true, equalization: true },
+  body: { enabled: false }, hand: { enabled: false }, gesture: { enabled: false },
 });
 
 let USE_FALLBACK_ONLY = false; // モデル未ロード時は true になり、強制フォールバック
