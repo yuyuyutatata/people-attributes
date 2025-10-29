@@ -1,9 +1,7 @@
-// ===================== main.js（置き換え用 完全版） =====================
-// 依存: index.htmlで tfjs と human をCDN読み込み済みであること
+// ===================== main.js（安定化ユニーク版） =====================
+// 依存CDNは index.html 側で読み込み済み：tfjs, human
 //   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
 //   <script src="https://cdn.jsdelivr.net/npm/@vladmandic/human/dist/human.js"></script>
-// （端末間ユニークにする場合のみ）
-//   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
 const video   = document.getElementById('video');
 const overlay = document.getElementById('overlay');
@@ -16,25 +14,23 @@ const statusEl= document.getElementById('status');
 const tbody   = document.getElementById('tbody');
 const logEl   = document.getElementById('log');
 
-// ---------- 設定 ----------
-const SITE_SECRET = 'CHANGE_ME_TO_RANDOM_32CHARS'; // 端末間で同じ値を入れる（公開しない）
-const USE_SUPABASE = false;                         // 端末間ユニークにするなら true
-const SUPABASE_URL  = 'https://xxxxxxxxxxxx.supabase.co';
-const SUPABASE_ANON = 'eyJhbGciOi...';
+// ------- パラメータ（必要に応じて調整） -------
+const SITE_SECRET   = 'CHANGE_ME_TO_RANDOM_32CHARS'; // 端末間で同値（公開しない）
+const STABLE_FRAMES = 8;          // 何フレーム連続で安定したらユニーク確定にするか
+const COS_THRESHOLD = 0.98;       // 連続埋め込みの類似度しきい値
+const MATCH_PIX     = 80;         // トラック割り当ての許容距離（px）
+const PURGE_MS      = 4000;       // この時間見失ったトラックは破棄
+const MIN_BOX       = 90;         // 顔ボックスの最小幅/高さ（小さすぎる顔は無視）
+const MIN_SCORE     = 0.2;        // 顔品質スコアの下限
 
-let sb = null;
-if (USE_SUPABASE && window.supabase) {
-  sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
-}
-
-// ---------- Human 初期化（属性＋顔ベクトル） ----------
+// ------- Human 初期化（属性＋descriptor） -------
 const human = new Human.Human({
   modelBasePath: 'https://cdn.jsdelivr.net/npm/@vladmandic/human/models',
   face: {
     detector:  { rotation: true, maxDetected: 5 },
     mesh: false, iris: false,
     description: { enabled: true }, // 年齢・性別
-    descriptor:  { enabled: true }  // 顔ベクトル（ユニーク判定に使用）
+    descriptor:  { enabled: true }  // 顔ベクトル
   },
   body: { enabled: false },
   hand: { enabled: false },
@@ -42,88 +38,31 @@ const human = new Human.Human({
   filter: { enabled: true, equalization: true },
 });
 
-// ---------- 日付・ユニーク管理 ----------
+// ------- 日付・ユニーク管理（端末内） -------
 function todayStr() {
-  const d = new Date(); // 必要ならJST固定に調整可
+  const d = new Date();
   const y = d.getFullYear();
   const m = String(d.getMonth()+1).padStart(2,'0');
-  const day = String(d.getDate()).padStart(2,'0');
-  return `${y}-${m}-${day}`;
+  const dd= String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${dd}`;
 }
-
 const uniqKey = () => `uniqHashes:${todayStr()}`;
 let uniqSet = loadUniqSet();
-
 function loadUniqSet() {
-  try {
-    const raw = localStorage.getItem(uniqKey());
-    return new Set(raw ? JSON.parse(raw) : []);
-  } catch { return new Set(); }
+  try { return new Set(JSON.parse(localStorage.getItem(uniqKey())||'[]')); }
+  catch { return new Set(); }
 }
-function saveUniqSet(set) {
-  localStorage.setItem(uniqKey(), JSON.stringify([...set]));
-}
-
-// 日付が変わったらリセット
+function saveUniqSet(set) { localStorage.setItem(uniqKey(), JSON.stringify([...set])); }
 let currentDay = todayStr();
 setInterval(() => {
   const t = todayStr();
-  if (t !== currentDay) {
-    currentDay = t;
-    uniqSet = new Set();
-    saveUniqSet(uniqSet);
-    resetMinute();
-  }
-}, 60 * 1000);
+  if (t !== currentDay) { currentDay = t; uniqSet = new Set(); saveUniqSet(uniqSet); resetMinute(); }
+}, 60*1000);
 
-// 顔ベクトル→匿名ハッシュ（日替わり）
-// ・小数丸めでフレーム差/端末差を吸収
-// ・日付＋シークレットを混ぜ、日をまたぐと別ID扱い
-async function hashFaceEmbedding(face) {
-  const emb = (face.descriptor || face.embedding);
-  if (!emb || !Array.isArray(emb) || emb.length === 0) return null;
-
-  // サイズ/品質が低い顔は除外（誤判定抑制）
-  const [x,y,w,h] = face.box;
-  if (w < 80 || h < 80) return null;                // 小さすぎる
-  if (face.faceScore && face.faceScore < 0.2) return null; // 品質低
-
-  const rounded = emb.map(v => Math.round(v * 100) / 100);  // 小数2桁
-  const payload = JSON.stringify({
-    r: rounded,
-    d: todayStr(),
-    s: SITE_SECRET,
-    v: 1 // バージョン
-  });
-
-  const enc = new TextEncoder().encode(payload);
-  const buf = await crypto.subtle.digest('SHA-256', enc);
-  let out = '';
-  const view = new DataView(buf);
-  for (let i = 0; i < 16; i++) out += view.getUint8(i).toString(16).padStart(2,'0'); // 32桁
-  return out;
-}
-
-// 端末間ユニーク（Supabase）: その日そのハッシュが未登録なら登録
-async function checkAndInsertRemoteUnique(hash) {
-  if (!sb) return null; // 端末内のみ
-  try {
-    const { error } = await sb.from('daily_uniques').insert({ day: todayStr(), hash }).select();
-    if (error) {
-      // 既存 or エラー
-      const msg = String(error.message).toLowerCase();
-      if (msg.includes('duplicate') || msg.includes('unique') || msg.includes('primary')) return false;
-      return null; // 通信等の失敗 → 端末内判定にフォールバック
-    }
-    return true; // 新規として登録できた
-  } catch {
-    return null;
-  }
-}
-
-// ---------- 集計（表は「直近1分のユニーク初回のみ」増加） ----------
+// ------- 集計（直近1分：日内初回のみ加算） -------
 const buckets = ['child','10s','20s','30s','40s','50s','60s+'];
-function toBucket(age) {
+const minuteCounts = {};
+function toBucket(age){
   if (age == null) return 'unknown';
   if (age < 13) return 'child';
   if (age < 20) return '10s';
@@ -133,134 +72,166 @@ function toBucket(age) {
   if (age < 60) return '50s';
   return '60s+';
 }
-const minuteCounts = {}; // { bucket: { male, female, unknown } }
-function initCounts() {
-  for (const b of [...buckets, 'unknown']) minuteCounts[b] = { male:0, female:0, unknown:0 };
-}
-initCounts();
-
-function renderTable() {
+function initCounts(){ for (const b of [...buckets,'unknown']) minuteCounts[b]={male:0,female:0,unknown:0}; }
+function renderTable(){
   const rows = [];
-  for (const b of [...buckets, 'unknown']) {
+  for (const b of [...buckets,'unknown']) {
     const c = minuteCounts[b];
     rows.push(`<tr><td>${b}</td><td>${c.male}</td><td>${c.female}</td><td>${c.unknown}</td></tr>`);
   }
   tbody.innerHTML = rows.join('');
 }
-function resetMinute() {
-  initCounts();
-  renderTable();
+function resetMinute(){ initCounts(); renderTable(); }
+initCounts(); renderTable();
+setInterval(resetMinute, 60*1000);
+
+// ------- ユーティリティ（埋め込み類似度・平均） -------
+function cosineSim(a,b){
+  let dot=0, na=0, nb=0;
+  const n = Math.min(a.length, b.length);
+  for (let i=0;i<n;i++){ const x=a[i], y=b[i]; dot+=x*y; na+=x*x; nb+=y*y; }
+  return dot / (Math.sqrt(na)*Math.sqrt(nb) + 1e-12);
 }
-setInterval(resetMinute, 60 * 1000);
+function meanEmbedding(buf){
+  const n = buf.length, d = buf[0].length;
+  const out = new Array(d).fill(0);
+  for (const v of buf){ for (let i=0;i<d;i++) out[i]+=v[i]; }
+  for (let i=0;i<d;i++) out[i]/=n;
+  return out;
+}
 
-// ---------- 実行ループ ----------
-let running = false;
-let stream  = null;
-let rafId   = null;
-let lastTick= 0;
+// ------- 匿名ハッシュ（平均埋め込み→丸め→SHA-256） -------
+async function hashFromEmbedding(emb){
+  // 丸め（0.02刻み）で端末/フレーム差をさらに吸収
+  const rounded = emb.map(v => Math.round(v * 50) / 50);
+  const payload = JSON.stringify({ r: rounded, d: todayStr(), s: SITE_SECRET, v:2 });
+  const enc = new TextEncoder().encode(payload);
+  const buf = await crypto.subtle.digest('SHA-256', enc);
+  const view = new DataView(buf);
+  let out=''; for (let i=0;i<16;i++) out += view.getUint8(i).toString(16).padStart(2,'0');
+  return out; // 32桁
+}
 
-async function startCamera() {
-  // モデルはここで一度だけロード
-  await human.load();
+// ------- 簡易トラッキング（位置近接） -------
+let nextTrackId = 1;
+const tracks = new Map(); // id -> { cx, cy, lastSeen, counted, embBuf:[], genderKey, ageBucket }
 
+function assignTrack(face){
+  const [x,y,w,h] = face.box;
+  const cx = x + w/2, cy = y + h/2;
+  let bestId=null, bestDist=Infinity;
+  for (const [id,t] of tracks){
+    const d = Math.hypot(t.cx - cx, t.cy - cy);
+    if (d < bestDist){ bestDist=d; bestId=id; }
+  }
+  if (bestDist <= MATCH_PIX){
+    const t = tracks.get(bestId);
+    t.cx = cx; t.cy = cy; t.lastSeen = performance.now();
+    return bestId;
+  } else {
+    const id = nextTrackId++;
+    tracks.set(id, { cx, cy, lastSeen: performance.now(), counted:false, embBuf:[], genderKey:'unknown', ageBucket:'unknown' });
+    return id;
+  }
+}
+function purgeOldTracks(){
+  const now = performance.now();
+  for (const [id,t] of tracks){
+    if (now - t.lastSeen > PURGE_MS) tracks.delete(id);
+  }
+}
+
+// ------- 実行ループ -------
+let running=false, stream=null, rafId=null, lastTick=0;
+
+async function startCamera(){
+  await human.load(); // 先にロード
   const facing = ckFront.checked ? 'user' : 'environment';
   stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: { ideal: facing }, width: { ideal: 640 }, height: { ideal: 480 } },
-    audio: false
+    video: { facingMode:{ideal:facing}, width:{ideal:640}, height:{ideal:480} }, audio:false
   });
-  video.srcObject = stream;
-  await video.play();
+  video.srcObject = stream; await video.play();
+  overlay.width = video.videoWidth || 640;
+  overlay.height= video.videoHeight|| 480;
 
-  overlay.width  = video.videoWidth  || 640;
-  overlay.height = video.videoHeight || 480;
-
-  running = true;
-  btnStart.disabled = true;
-  btnStop.disabled  = false;
-  statusEl.textContent = '実行中（オンデバイス推論・送信なし）';
-
+  running=true; btnStart.disabled=true; btnStop.disabled=false;
+  statusEl.textContent='実行中（オンデバイス推論・送信なし）';
   loop();
 }
-
-function stopCamera() {
-  running = false;
+function stopCamera(){
+  running=false;
   if (rafId) cancelAnimationFrame(rafId);
-  if (stream) {
-    stream.getTracks().forEach(t => t.stop());
-    stream = null;
-  }
-  btnStart.disabled = false;
-  btnStop.disabled  = true;
-  statusEl.textContent = '停止';
+  if (stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
+  btnStart.disabled=false; btnStop.disabled=true;
+  statusEl.textContent='停止';
 }
 
-async function loop(ts) {
+async function loop(ts){
   if (!running) return;
-
-  // ~10FPSに間引き
-  if (ts && ts - lastTick < 100) { rafId = requestAnimationFrame(loop); return; }
+  if (ts && ts - lastTick < 100){ rafId=requestAnimationFrame(loop); return; }
   lastTick = ts || performance.now();
 
   const result = await human.detect(video);
 
-  // 描画
+  // 画面描画
   ctx.clearRect(0,0,overlay.width,overlay.height);
-  ctx.drawImage(video, 0, 0, overlay.width, overlay.height);
+  ctx.drawImage(video,0,0,overlay.width,overlay.height);
 
   const faces = result.face || [];
-  for (const f of faces) {
-    // 年齢・性別の読み出し
+  for (const f of faces){
+    const [x,y,w,h] = f.box;
+    const q = f.faceScore ?? 1;
+
+    // 小さすぎる/品質低は無視（ハッシュがブレやすい）
+    if (w < MIN_BOX || h < MIN_BOX || q < MIN_SCORE) {
+      // 描画だけしてスキップ
+      drawBox(f, 'weak');
+      continue;
+    }
+
+    const id = assignTrack(f);
+    const tr = tracks.get(id);
+
+    // 属性
     const gender = (f.gender || 'unknown').toLowerCase();
-    const score  = typeof f.genderScore === 'number' ? f.genderScore : 0;
-    const age    = typeof f.age === 'number' ? Math.round(f.age) : null;
-    const bucket = toBucket(age);
-    const gkey   = (score > 0.6) ? (gender.startsWith('f') ? 'female' : 'male') : 'unknown';
+    const gscore = typeof f.genderScore === 'number' ? f.genderScore : 0;
+    tr.genderKey = (gscore > 0.6) ? (gender.startsWith('f') ? 'female' : 'male') : 'unknown';
+    const age  = typeof f.age === 'number' ? Math.round(f.age) : null;
+    tr.ageBucket = toBucket(age);
 
-    // ---- ユニーク判定（端末内 + 端末間オプション） ----
-    const h = await hashFaceEmbedding(f);
-    if (h) {
-      let shouldCount = false;
+    // 埋め込みをバッファに蓄積（正規化）
+    const emb = (f.descriptor || f.embedding);
+    if (Array.isArray(emb) && emb.length > 0) tr.embBuf.push(emb);
 
-      if (!uniqSet.has(h)) {
-        // 端末内では初回
-        if (sb) {
-          const remote = await checkAndInsertRemoteUnique(h);
-          if (remote === true) {
-            // 端末間でも初回
-            shouldCount = true;
-          } else if (remote === false) {
-            // 既に別端末でカウント済み → 加算しない
-            shouldCount = false;
-          } else {
-            // 通信不調 → 端末内初回として加算（運用に応じてfalseでもOK）
-            shouldCount = true;
-          }
-        } else {
-          // 端末内ユニークのみ
-          shouldCount = true;
-        }
-        uniqSet.add(h);
-        saveUniqSet(uniqSet);
+    // まだカウントしていないトラックだけ、安定化チェック
+    if (!tr.counted && tr.embBuf.length >= STABLE_FRAMES){
+      // 直近 STABLE_FRAMES で安定しているか？
+      const recent = tr.embBuf.slice(-STABLE_FRAMES);
+      let ok = true;
+      for (let i=1;i<recent.length;i++){
+        const sim = cosineSim(recent[i-1], recent[i]);
+        if (sim < COS_THRESHOLD){ ok=false; break; }
       }
-
-      if (shouldCount) {
-        minuteCounts[bucket][gkey] += 1; // ← “その人の当日初回”だけ増える
+      if (ok){
+        const meanEmb = meanEmbedding(recent);
+        const hsh = await hashFromEmbedding(meanEmb);
+        if (hsh && !uniqSet.has(hsh)){
+          // 当日ユニークとして確定：1回だけ加算
+          minuteCounts[tr.ageBucket][tr.genderKey] += 1;
+          uniqSet.add(hsh); saveUniqSet(uniqSet);
+          tr.counted = true;
+        } else {
+          // 既に同一人物として登録済み → 加算しない
+          tr.counted = true;
+        }
       }
     }
 
     // 枠とラベル
-    const [x,y,w,hBox] = f.box;
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = '#00FF88';
-    ctx.strokeRect(x, y, w, hBox);
-    const label = `${bucket} • ${gkey}` + (age ? ` (${age})` : '');
-    ctx.fillStyle = 'rgba(0,0,0,0.5)';
-    const tw = ctx.measureText(label).width + 10;
-    ctx.fillRect(x, Math.max(0, y-20), tw, 20);
-    ctx.fillStyle = '#fff';
-    ctx.fillText(label, x+5, Math.max(12, y-6));
+    drawBox(f, tr.counted ? 'counted' : 'tracking', tr.ageBucket, tr.genderKey, age);
   }
 
+  purgeOldTracks();
   renderTable();
   const fps = (1000 / (performance.now() - lastTick + 1)).toFixed(1);
   logEl.textContent = `faces: ${faces.length}\nFPS approx: ${fps}`;
@@ -268,18 +239,27 @@ async function loop(ts) {
   rafId = requestAnimationFrame(loop);
 }
 
-// ---------- UI ----------
-btnStart.addEventListener('click', async () => {
-  try { await startCamera(); }
-  catch (e) { statusEl.textContent = 'カメラ開始に失敗: ' + e.message; }
-});
-btnStop.addEventListener('click', stopCamera);
+function drawBox(f, mode='tracking', bucket='unknown', gkey='unknown', age=null){
+  const [x,y,w,h] = f.box;
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = (mode==='counted') ? '#00FF88' : (mode==='weak' ? '#FFA500' : '#3fa9f5');
+  ctx.strokeRect(x,y,w,h);
+  const label = (mode==='counted'?'✔ ':'') + `${bucket} • ${gkey}` + (age?` (${age})`:'');
+  ctx.fillStyle='rgba(0,0,0,0.5)';
+  const tw = ctx.measureText(label).width + 10;
+  ctx.fillRect(x, Math.max(0,y-20), tw, 20);
+  ctx.fillStyle='#fff';
+  ctx.fillText(label, x+5, Math.max(12, y-6));
+}
 
-btnCsv.addEventListener('click', () => {
+// ------- UI -------
+btnStart.addEventListener('click', async ()=>{ try{ await startCamera(); } catch(e){ statusEl.textContent='カメラ開始に失敗: '+e.message; }});
+btnStop .addEventListener('click', stopCamera);
+btnCsv  .addEventListener('click', () => {
   const lines = ['bucket,male,female,unknown'];
-  for (const b of [...buckets, 'unknown']) {
+  for (const b of [...buckets,'unknown']) {
     const c = minuteCounts[b];
-    lines.push([b, c.male, c.female, c.unknown].join(','));
+    lines.push([b,c.male,c.female,c.unknown].join(','));
   }
   const blob = new Blob([lines.join('\n')], {type:'text/csv'});
   const url  = URL.createObjectURL(blob);
@@ -287,7 +267,6 @@ btnCsv.addEventListener('click', () => {
   a.click(); URL.revokeObjectURL(url);
 });
 
-// ページ表示時の注意
 if (!('mediaDevices' in navigator && 'getUserMedia' in navigator.mediaDevices)) {
   statusEl.textContent = 'このブラウザはカメラ取得に未対応です';
 } else {
