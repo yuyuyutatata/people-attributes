@@ -49,13 +49,41 @@ const human = new Human.Human({
   body: { enabled: false }, hand: { enabled: false }, gesture: { enabled: false },
 });
 
+// ---- ここだけ差し替え：モデルロードを堅牢化 ----
 async function ensureModelsLoaded() {
-  console.log('Loading Human models...');
-  await human.load();
-  await human.warmup();               // WebGL初期化＆モデル準備
-  const v = await human.validate();
-  console.log('Model validation result:', v);
-  if (!v.face) console.warn('⚠️ Face model not fully ready (will still try).');
+  const bases = [
+    'https://cdn.jsdelivr.net/npm/@vladmandic/human@3.6.0/models',
+    'https://unpkg.com/@vladmandic/human@3.6.0/models',
+    'https://fastly.jsdelivr.net/npm/@vladmandic/human@3.6.0/models',
+  ];
+
+  let ok = false;
+  for (const base of bases) {
+    try {
+      human.config.modelBasePath = base;
+      console.log('[Human] try modelBasePath:', base);
+      await human.load();
+      await human.warmup();                 // WebGL初期化＋重たいモデルの準備
+      const v = await human.validate();     // 何が使えるか確認
+      console.log('[Human] validate:', v);
+      if (v.face) {                        // 顔モデルが使えれば採用
+        ok = true;
+        console.log('✅ Face model ready (', base, ')');
+        break;
+      }
+    } catch (e) {
+      console.warn('⚠️ load failed at', base, e);
+    }
+  }
+
+  if (!ok) {
+    // 顔の埋め込み/属性モデルが落ちた場合でも、検出器やVideoは動くことが多い
+    // → その場合は “滞在ベースのフォールバック集計のみ” で継続する
+    console.warn('⚠️ Face models not fully ready. Fallback counting only.');
+    // できる限り検出はさせる config（descriptor/descriptionを落として軽量化）
+    human.config.face.description = { enabled: false };
+    human.config.face.descriptor  = { enabled: false };
+  }
 }
 
 // ---------------- 日付 & ユニーク管理（端末内） ----------------
