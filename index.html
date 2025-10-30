@@ -4,59 +4,54 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>属性カウント（オンデバイス）</title>
-  <link rel="icon" href="data:,"><!-- favicon 404防止（不要なら外してOK） -->
-
+  <link rel="manifest" href="manifest.json" />
   <style>
-    :root { --w: 640px; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 12px; }
-    header { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px; }
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 12px; }
+    header { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    video, canvas { width: 100%; max-width: 480px; border-radius: 8px; }
+    .row { display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start; }
+    .panel { flex:1 1 320px; min-width: 280px; }
+    table { border-collapse: collapse; width:100%; }
+    th,td { border:1px solid #ddd; padding:6px 8px; text-align:center; }
+    #log { font-size:12px; color:#666; white-space:pre-wrap; }
     button { padding:8px 12px; }
-    label { margin-left:6px; user-select:none; }
-    .wrap { display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start; }
-    .panel { flex: 1 1 320px; min-width: 280px; }
-    canvas { width: 100%; max-width: var(--w); border-radius: 10px; display:block; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: center; }
-    #log { font-size: 12px; color: #666; white-space: pre-wrap; margin-top: 6px; }
-    /* 念のため、もしDOMにvideoが居ても画面には絶対に出さない */
-    video { display:none !important; width:1px !important; height:1px !important;
-            position:absolute !important; left:-9999px !important; top:-9999px !important;
-            opacity:0 !important; pointer-events:none !important; }
+    label { display:block; margin:8px 0 4px; }
   </style>
+  <!-- 必ずこの2行を head か body末尾に入れる（順番もこの通り） -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/human@3.6.0/dist/human.js"></script>
+<link rel="icon" href="./favicon.ico">
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
 
-  <!-- ライブラリは1回だけ読み込む -->
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/human@3.6.0/dist/human.js"></script>
 </head>
 <body>
   <header>
     <button id="btnStart">カメラ開始</button>
     <button id="btnStop" disabled>停止</button>
     <button id="btnCsv">CSVダウンロード</button>
-    <label><input type="checkbox" id="ckFront"> 前面カメラを使う</label>
+    <label><input type="checkbox" id="ckFront" />前面カメラを使う</label>
     <span id="status">準備中…</span>
   </header>
 
-  <div class="wrap">
+  <div class="row">
     <div class="panel">
-      <!-- videoはHTMLには置かない（main.jsで非表示videoを生成） -->
+      <video id="video" playsinline muted></video>
       <canvas id="overlay"></canvas>
       <div id="log"></div>
     </div>
-
     <div class="panel">
       <h3>集計（直近1分）</h3>
-      <table>
-        <thead>
-          <tr><th>年齢層</th><th>男性</th><th>女性</th><th>不確実</th></tr>
-        </thead>
+      <table id="tbl">
+        <thead><tr><th>年齢層</th><th>男性</th><th>女性</th><th>不確実</th></tr></thead>
         <tbody id="tbody"></tbody>
       </table>
       <p>※ 年齢は概ねの推定（例：10s=10代, 20s=20代…）。</p>
-      <div id="total" style="margin-top:6px;font-weight:600;"></div>
     </div>
   </div>
 
+  <!-- tfjs & Human（バンドル）CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/human/dist/human.js"></script>
   <script src="main.js"></script>
 </body>
 </html>
