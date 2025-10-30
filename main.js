@@ -1,38 +1,52 @@
 // ----------------------------------------------------
 // main.js : Humanによる年齢・性別属性推定＋ユニーク集計
 // ----------------------------------------------------
+// === main.js: Human の到着を待ってから初期化する ===
+// === main.js: Human の到着を待ってから初期化する ===
+(async function boot() {
+  // Human が来るまで最大5秒待つ
+  for (let i = 0; i < 50 && !window.Human; i++) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+  if (!window.Human) {
+    const st = document.getElementById('status');
+    if (st) st.textContent = 'Humanが読み込めませんでした（ネットワーク/キャッシュを確認）';
+    console.error('Human not loaded');
+    return;
+  }
 
-const overlay = document.getElementById('overlay');
-const ctx = overlay.getContext('2d');
-const btnStart = document.getElementById('btnStart');
-const btnStop = document.getElementById('btnStop');
-const btnCsv = document.getElementById('btnCsv');
-const ckFront = document.getElementById('ckFront');
-const statusEl = document.getElementById('status');
-const tbody = document.getElementById('tbody');
-const logEl = document.getElementById('log');
+  // ここから下は “元の main.js の中身” を入れてください
+  // 例：
+  const overlay = document.getElementById('overlay');
+  const ctx = overlay.getContext('2d');
+  const btnStart = document.getElementById('btnStart');
+  const btnStop  = document.getElementById('btnStop');
+  const btnCsv   = document.getElementById('btnCsv');
+  const ckFront  = document.getElementById('ckFront');
+  const statusEl = document.getElementById('status');
+  const tbody    = document.getElementById('tbody');
+  const logEl    = document.getElementById('log');
 
-// 非表示のvideoを生成（カメラ入力専用）
-const video = document.createElement('video');
-video.id = 'video';
-video.playsInline = true;
-video.muted = true;
-document.body.appendChild(video);
+  // 非表示の video（入力用）
+  const video = document.createElement('video');
+  video.id = 'video'; video.playsInline = true; video.muted = true;
+  document.body.appendChild(video);
 
-// Human設定
-const human = new Human.Human({
-  modelBasePath: './models', // ローカルモデル利用
-  face: {
-    detector: { rotation: true, maxDetected: 5 },
-    mesh: false, iris: false,
-    description: { enabled: true },
-    descriptor: { enabled: true }
-  },
-  body: { enabled: false },
-  hand: { enabled: false },
-  gesture: { enabled: false },
-  filter: { enabled: true, equalization: true }
-});
+  // Human 構成
+  const human = new Human.Human({
+    modelBasePath: './models',
+    face: {
+      detector: { rotation: true, maxDetected: 5 },
+      mesh: false, iris: false,
+      description: { enabled: true },
+      descriptor:  { enabled: true }
+    },
+    body: { enabled: false }, hand: { enabled: false }, gesture: { enabled: false },
+    filter: { enabled: true, equalization: true },
+  });
+
+  // ……（ここ以降は、あなたの main.js 本文をそのまま続けてください）
+})();
 
 // ----------------------------------------------------
 // 集計関連
