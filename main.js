@@ -1,4 +1,4 @@
-// === 日次集計・同一人物は日内で厳密に1回のみ ===
+// === 日次集計・動いても同じ人は日内で厳密に1回のみ ===
 (async function boot() {
   // ---- DOM ----
   const overlay = document.getElementById('overlay');
@@ -10,7 +10,7 @@
   const statusEl = document.getElementById('status');
   const tbody    = document.getElementById('tbody');
   const logEl    = document.getElementById('log');
-  if (logEl) logEl.remove(); // 「今日のユニーク合計」などのテキストは消す
+  if (logEl) logEl.remove(); // 余計な表示は消す
 
   btnStop.disabled = true;
   statusEl.textContent = '準備中…';
@@ -28,7 +28,7 @@
   const human = new Human.Human({
     modelBasePath: './models',
     face: {
-      detector: { rotation:true, maxDetected: 3 }, // 少数に抑えて誤検出を減らす
+      detector: { rotation:true, maxDetected: 3 }, // 少数に制限
       mesh:false, iris:false,
       description:{ enabled:true },   // 年齢・性別
       descriptor:{  enabled:true },   // 顔ベクトル
@@ -36,123 +36,174 @@
     body:{enabled:false}, hand:{enabled:false}, gesture:{enabled:false},
     filter:{enabled:true, equalization:true},
   });
-
-  // 先にロード（毎フレームのloadをやめる）
   await human.load().catch(()=>{});
 
-  // ---- 日付ユーティリティ ----
+  // ---- 日付・保存 ----
   const todayStr = () => {
-    const d = new Date();
-    const y = d.getFullYear();
-    const m = String(d.getMonth()+1).padStart(2,'0');
-    const day = String(d.getDate()).padStart(2,'0');
-    return `${y}-${m}-${day}`;
+    const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
   };
   let currentDay = todayStr();
 
-  // ---- 日次集計（localStorage 永続化）----
   const buckets = ['child','10s','20s','30s','40s','50s','60s+','unknown'];
-  function blankCounts(){ const o={}; for(const b of buckets) o[b]={male:0,female:0,unknown:0}; return o; }
-  function countsKey(day){ return `counts:${day}`; }
-  function uniqKey(day){ return `uniq:${day}`; }
+  const blankCounts = ()=>{ const o={}; for(const b of buckets) o[b]={male:0,female:0,unknown:0}; return o; };
+  const countsKey = d => `counts:${d}`;
+  const uniqKey   = d => `uniq:${d}`;
 
-  function loadCounts(day){ try{ const raw = localStorage.getItem(countsKey(day)); return raw ? JSON.parse(raw) : blankCounts(); }catch{ return blankCounts(); } }
-  function saveCounts(day, obj){ localStorage.setItem(countsKey(day), JSON.stringify(obj)); }
-
-  function loadUniqSet(day){ try{ const raw = localStorage.getItem(uniqKey(day)); return new Set(raw ? JSON.parse(raw) : []);}catch{ return new Set(); } }
-  function saveUniqSet(day, set){ localStorage.setItem(uniqKey(day), JSON.stringify([...set])); }
+  const loadCounts = d => { try{ const raw = localStorage.getItem(countsKey(d)); return raw ? JSON.parse(raw) : blankCounts(); }catch{ return blankCounts(); } };
+  const saveCounts = (d, obj) => localStorage.setItem(countsKey(d), JSON.stringify(obj));
+  const loadUniq   = d => { try{ const raw = localStorage.getItem(uniqKey(d)); return new Set(raw?JSON.parse(raw):[]);}catch{ return new Set(); } };
+  const saveUniq   = (d, set) => localStorage.setItem(uniqKey(d), JSON.stringify([...set]));
 
   let dayCounts = loadCounts(currentDay);
-  let uniqSet   = loadUniqSet(currentDay);
+  let uniqSet   = loadUniq(currentDay);
 
-  function renderTable(){
+  const renderTable = () => {
     tbody.innerHTML = buckets.map(b=>{
       const c = dayCounts[b];
       return `<tr><td>${b}</td><td>${c.male}</td><td>${c.female}</td><td>${c.unknown}</td></tr>`;
     }).join('');
-  }
+  };
   renderTable();
 
-  // ---- 類似計算ユーティリティ ----
-  function normalize(v){
+  // ---- ベクトル処理 ----
+  const SITE_SECRET = 'FIXED_SECRET_12345';
+  const normalize = v => {
     const out = new Float32Array(v.length); let n=0;
     for(let i=0;i<v.length;i++){ const x=v[i]; n+=x*x; }
     const s = n ? 1/Math.sqrt(n) : 1;
     for(let i=0;i<v.length;i++) out[i]=v[i]*s;
     return out;
-  }
-  function cosSim(a,b){
+  };
+  const cosSim = (a,b) => {
     let dot=0,na=0,nb=0, L=Math.min(a.length,b.length);
     for(let i=0;i<L;i++){ const x=a[i],y=b[i]; dot+=x*y; na+=x*x; nb+=y*y; }
     return (na&&nb)? dot/(Math.sqrt(na)*Math.sqrt(nb)) : 0;
-  }
-  function iou(b1,b2){
+  };
+  const iou = (b1,b2) => {
     const [x1,y1,w1,h1]=b1,[x2,y2,w2,h2]=b2;
     const xa=Math.max(x1,x2), ya=Math.max(y1,y2);
     const xb=Math.min(x1+w1,x2+w2), yb=Math.min(y1+h1,y2+h2);
     const inter=Math.max(0,xb-xa)*Math.max(0,yb-ya);
     const uni=w1*h1+w2*h2-inter;
     return uni>0? inter/uni:0;
-  }
+  };
+  const centerDist = (b1,b2) => {
+    const c1x=b1[0]+b1[2]/2, c1y=b1[1]+b1[3]/2;
+    const c2x=b2[0]+b2[2]/2, c2y=b2[1]+b2[3]/2;
+    const dx=c1x-c2x, dy=c1y-c2y;
+    return Math.hypot(dx,dy);
+  };
 
-  // ---- “人物クラスタ”記憶（カウント済みの代表ベクトル群）----
-  // 既知の人と非常に似ていれば（=同一とみなして）再カウント禁止
-  const people = []; // [{vecs:[Float32Array,...]}]
-  const MEMORY_SIM_TH = 0.998; // ← より厳格に
-  function matchesKnownPerson(vec){
-    for(const p of people){
-      for(const v of p.vecs){
-        if (cosSim(vec, v) >= MEMORY_SIM_TH) return true;
-      }
-    }
-    return false;
-  }
-  function addPersonVec(vec){
-    for(const p of people){
-      for(const v of p.vecs){
-        if (cosSim(vec, v) >= MEMORY_SIM_TH) {
-          p.vecs.push(vec);
-          if (p.vecs.length>3) p.vecs.shift();
-          return;
-        }
-      }
-    }
-    people.push({ vecs:[vec] });
-  }
-
-  // ---- 直近観測 & トラック状態（滞在中の再カウント禁止）----
-  const recent=[];                  // {vec, box, t}
-  const trackState=new Map();       // key -> {streak,lastTs,lastBox,countedForever}
-  const RECENT_MS=60*1000, SIM_TH=0.995, IOU_TH=0.50, STREAK_N=6; // ← さらに厳格
-
-  function prune(now){
-    for(let i=recent.length-1;i>=0;i--) if(now-recent[i].t>RECENT_MS) recent.splice(i,1);
-    for(const [k,st] of trackState) if(now-st.lastTs>RECENT_MS) trackState.delete(k);
-  }
-  function gridKey(box){ const [x,y,w,h]=box; return [Math.round((x+w/2)/40),Math.round((y+h/2)/40),Math.round(w/40),Math.round(h/40)].join(':'); }
-  function findDup(vec,box,now){
-    let best=null,simBest=0;
-    for(const r of recent){ if(now-r.t>RECENT_MS) continue;
-      const s=cosSim(vec,r.vec||vec);
-      if(s>=SIM_TH && iou(box,r.box)>=IOU_TH && s>simBest){best=r;simBest=s;}
-    }
-    return best;
-  }
-
-  async function hashFaceEmbedding(face){
+  async function faceEmbedding(face){
     const emb = face.descriptor || face.embedding;
-    if(!emb || !Array.isArray(emb)) return {vec:null,hash:null};
+    if(!emb || !Array.isArray(emb)) return {vec:null, hash:null};
     const norm = normalize(new Float32Array(emb));
     // 量子化（0.02刻み）で日内ハッシュを安定化
     const q = Array.from(norm, v=>Math.round(v/0.02)*0.02);
-    const payload = JSON.stringify({ r:q, d: currentDay, s: 'FIXED_SECRET_12345' });
+    const payload = JSON.stringify({ r:q, d: currentDay, s: SITE_SECRET });
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
     const v = new Uint8Array(buf);
     const hash = Array.from(v.slice(0,16), b=>b.toString(16).padStart(2,'0')).join('');
     return { vec: norm, hash };
   }
 
-  // ---- カメラ制御 ----
+  // ---- 既知の人物クラスタ（ベクトル代表）----
+  const people = []; // [{vecs:[Float32Array,...]}]
+  const MEMORY_SIM_TH = 0.998; // 姿勢が変わっても同一とみなす厳格さ
+  const matchesKnownPerson = vec => people.some(p => p.vecs.some(v => cosSim(vec, v) >= MEMORY_SIM_TH));
+  const addPersonVec = vec => {
+    for(const p of people){
+      for(const v of p.vecs){
+        if (cosSim(vec, v) >= MEMORY_SIM_TH) {
+          p.vecs.push(vec); if (p.vecs.length>3) p.vecs.shift(); return;
+        }
+      }
+    }
+    people.push({ vecs:[vec] });
+  };
+
+  // ---- 簡易トラッカー（動いても同一トラックへ割当）----
+  // 各トラックは 2秒 見失うと終了。確定（STREAKを満たす）時に一回だけカウント。
+  let nextTrackId = 1;
+  const tracks = new Map(); // id -> {id, box, vec, lastTs, streak, counted, hash}
+  const TRACK_MAX_AGE = 2000;  // ms
+  const STREAK_N = 6;          // 連続フレームでの確定条件（厳しめ）
+  const COST_SIM_W = 0.7;      // 顔類似の重み（高）
+  const COST_DIST_W = 0.2;     // 位置距離の重み
+  const COST_IOU_W  = 0.1;     // IoU は「1-IOU」でコストに
+  const NORM_DIST = () => Math.hypot(overlay.width, overlay.height); // 正規化距離
+
+  function cleanupTracks(now){
+    for(const [id,t] of tracks){
+      if (now - t.lastTs > TRACK_MAX_AGE) tracks.delete(id);
+    }
+  }
+
+  // 検出一覧(detections)と既存tracksをマッチング（小規模なので貪欲マッチで十分）
+  function assignDetectionsToTracks(dets){
+    const now = performance.now();
+    cleanupTracks(now);
+    const unassigned = new Set(dets.map((_,i)=>i));
+    const entries = [...tracks.values()];
+
+    // コスト行列を作る（低いほど良い）
+    const pairs = [];
+    for(const t of entries){
+      for(let i=0;i<dets.length;i++){
+        const d = dets[i];
+        // 距離が大きすぎる・IoUが小さすぎる場合はスキップ
+        const dist = centerDist(t.box, d.box) / NORM_DIST();
+        const ov   = iou(t.box, d.box);
+        const sim  = t.vec && d.vec ? cosSim(t.vec, d.vec) : 0;
+        const cost = COST_SIM_W * (1 - sim) + COST_DIST_W * dist + COST_IOU_W * (1 - ov);
+        pairs.push({tid:t.id, i, cost, sim, dist, ov});
+      }
+    }
+    // コスト昇順に割当
+    pairs.sort((a,b)=>a.cost-b.cost);
+
+    const usedT = new Set(), usedD = new Set();
+    const matches = [];
+    const SIM_MIN = 0.995;   // 顔ベクトルの最低類似
+    const IOU_MIN = 0.35;    // 位置重なり
+    const DIST_MAX = 0.15;   // 画面対角比での距離上限
+
+    for(const p of pairs){
+      if (usedT.has(p.tid) || usedD.has(p.i)) continue;
+      if (p.sim >= SIM_MIN && p.ov >= IOU_MIN && p.dist <= DIST_MAX) {
+        matches.push(p);
+        usedT.add(p.tid); usedD.add(p.i);
+        unassigned.delete(p.i);
+      }
+    }
+
+    // マッチしたものはトラック更新、してない検出は後で新規トラック化
+    for(const m of matches){
+      const t = tracks.get(m.tid);
+      const d = dets[m.i];
+      t.box = d.box; t.vec = d.vec; t.hash = d.hash || t.hash;
+      t.lastTs = now;
+      t.streak = Math.min(t.streak + 1, STREAK_N);
+    }
+
+    return [...unassigned];
+  }
+
+  function createTrack(det){
+    const now = performance.now();
+    const t = {
+      id: nextTrackId++,
+      box: det.box,
+      vec: det.vec,
+      hash: det.hash || null,
+      streak: 1,
+      counted: false,
+      lastTs: now,
+    };
+    tracks.set(t.id, t);
+  }
+
+  // ---- カメラ ----
   let running=false, stream=null, rafId=null, lastTick=0;
 
   async function startCamera(){
@@ -163,7 +214,7 @@
     video.srcObject=stream; await video.play();
     overlay.width=video.videoWidth||640; overlay.height=video.videoHeight||480;
     running=true; btnStart.disabled=true; btnStop.disabled=false;
-    statusEl.textContent='実行中（集計単位：今日）';
+    statusEl.textContent='実行中（日次・動いても1回だけ）';
     loop();
   }
   function stopCamera(){
@@ -175,16 +226,16 @@
   async function loop(ts){
     if(!running) return;
 
-    // 日付が変わったらリセット（自動で“その日”に切り替え）
-    const dayNow = todayStr();
-    if (dayNow !== currentDay) {
-      currentDay = dayNow;
+    // 日付跨ぎ検知
+    const dnow = todayStr();
+    if (dnow !== currentDay) {
+      currentDay = dnow;
       dayCounts = loadCounts(currentDay);
-      uniqSet   = loadUniqSet(currentDay);
+      uniqSet   = loadUniq(currentDay);
       renderTable();
     }
 
-    if (ts && ts-lastTick<100){ rafId=requestAnimationFrame(loop); return; }
+    if(ts && ts-lastTick<100){ rafId=requestAnimationFrame(loop); return; }
     lastTick = ts || performance.now();
 
     const result = await human.detect(video);
@@ -192,77 +243,73 @@
     ctx.clearRect(0,0,overlay.width,overlay.height);
     ctx.drawImage(video,0,0,overlay.width,overlay.height);
 
-    const faces = result.face || [];
-    const now = performance.now(); prune(now);
+    // 検出の前処理（スコア・サイズの最低ライン）
+    const MIN_FACE_SCORE = 0.65;
+    const MIN_AREA_RATIO = 0.04; // 4%未満は採用しない（遠景や誤検出を排除）
+    const frameArea = overlay.width * overlay.height;
 
-    for(const f of faces){
+    // 検出を「埋め込み付き」にして配列化
+    const faces = (result.face || []).filter(f => {
       const [x,y,w,h] = f.box;
+      const okScore = (typeof f.score !== 'number') ? true : f.score >= MIN_FACE_SCORE;
+      const okArea  = (w*h)/frameArea >= MIN_AREA_RATIO;
+      return okScore && okArea;
+    });
 
-      // --- さらに厳格な前提チェック ---
-      // 顔スコア（あれば）と顔サイズの最低ラインで誤検出を弾く
-      const MIN_FACE_SCORE = 0.6;                       // 推定品質の下限
-      const MIN_AREA_RATIO = 0.03;                      // フレームに占める面積比の下限（3%）
-      const area = w*h, frameArea = overlay.width*overlay.height;
-      if (typeof f.score === 'number' && f.score < MIN_FACE_SCORE) continue;
-      if (frameArea && (area/frameArea) < MIN_AREA_RATIO) continue;
+    const detections = [];
+    for (const f of faces) {
+      const {vec, hash} = await faceEmbedding(f);
+      if (!vec || !hash) continue;
+      detections.push({ box: f.box, vec, hash, age: f.age ? Math.round(f.age) : null, gender: (f.gender||'unknown').toLowerCase() });
+    }
 
-      // 属性
-      const age = f.age ? Math.round(f.age) : null;
-      const bucket = age==null ? 'unknown'
-                   : age<13 ? 'child'
-                   : age<20 ? '10s'
-                   : age<30 ? '20s'
-                   : age<40 ? '30s'
-                   : age<50 ? '40s'
-                   : age<60 ? '50s' : '60s+';
-      const g = (f.gender||'unknown').toLowerCase();
-      const gkey = g.startsWith('f') ? 'female' : (g.startsWith('m') ? 'male' : 'unknown');
+    // 既存トラックに割当
+    const unassignedIdx = assignDetectionsToTracks(detections);
 
-      // べクトル＆ハッシュ
-      const {vec, hash} = await hashFaceEmbedding(f);
-      if(!vec || !hash){ draw(); continue; }
+    // 未割当の検出は新規トラックとして作成
+    for (const idx of unassignedIdx) createTrack(detections[idx]);
 
-      // 短期追尾（連続フレーム安定化を厳しめに）
-      const key = gridKey(f.box);
-      const st = trackState.get(key) || { streak:0, lastTs:0, lastBox:f.box, countedForever:false };
-
-      const dup = findDup(vec, f.box, now);
-      const stable = !!dup || iou(st.lastBox, f.box) >= IOU_TH;
-      st.streak = stable ? Math.min(st.streak+1, STREAK_N) : 1;
-      st.lastTs = now; st.lastBox = f.box;
-
-      // すでにこの滞在で確定済みなら何もしない
-      if (!st.countedForever && st.streak >= STREAK_N) {
-        // ① 既知クラスタと極めて類似なら同一人物として弾く
-        const alreadyKnown = matchesKnownPerson(vec);
-
-        // ② 日内ユニーク（ハッシュ）で初めてのみ加算
-        if (!alreadyKnown && !uniqSet.has(hash)) {
-          uniqSet.add(hash); saveUniqSet(currentDay, uniqSet);
-          dayCounts[bucket][gkey] += 1;
-          saveCounts(currentDay, dayCounts);
-          addPersonVec(vec); // クラスタへ登録
-          renderTable();
+    // トラックごとの確定＆カウント判定
+    for (const t of [...tracks.values()]) {
+      if (t.streak >= STREAK_N && !t.counted && t.vec && t.hash) {
+        // 既知クラスタに十分近ければ同一人物として弾く
+        if (!matchesKnownPerson(t.vec)) {
+          if (!uniqSet.has(t.hash)) {
+            // 初出の人物 → カウント（年齢・性別はトラックに残っていないので直近検出から推定）
+            // 最も近い検出を使って属性を得る（表示目的）
+            let attr = {bucket:'unknown', gkey:'unknown'};
+            let bestSim=-1;
+            for (const d of detections) {
+              const s = cosSim(t.vec, d.vec);
+              if (s>bestSim) { bestSim=s;
+                const age = d.age;
+                attr.bucket = age==null ? 'unknown' : age<13?'child':age<20?'10s':age<30?'20s':age<40?'30s':age<50?'40s':age<60?'50s':'60s+';
+                const g = d.gender; attr.gkey = g.startsWith('f')?'female':(g.startsWith('m')?'male':'unknown');
+              }
+            }
+            uniqSet.add(t.hash); saveUniq(currentDay, uniqSet);
+            dayCounts[attr.bucket][attr.gkey] += 1; saveCounts(currentDay, dayCounts);
+            renderTable();
+            addPersonVec(t.vec); // 代表ベクトルを記憶
+          } else {
+            // ハッシュ一致＝確実に同一人物 → 代表ベクトルだけ更新
+            addPersonVec(t.vec);
+          }
         }
-        st.countedForever = true; // この滞在中は再カウントしない
+        t.counted = true; // このトラックは以後カウントしない
       }
+    }
 
-      // 観測ログ更新
-      recent.push({vec, box:f.box, t:now});
-      if (recent.length > 200) recent.shift();
-
-      trackState.set(key, st);
-
-      // 表示
-      function draw(){
-        ctx.lineWidth=2; ctx.strokeStyle='#00FF88'; ctx.strokeRect(x,y,w,h);
-        const tag = `${bucket} • ${gkey}` + (age ? ` (${age})` : '');
-        ctx.fillStyle='rgba(0,0,0,0.5)';
-        const tw = ctx.measureText(tag).width + 10;
-        ctx.fillRect(x, Math.max(0, y-20), tw, 20);
-        ctx.fillStyle='#fff'; ctx.fillText(tag, x+5, Math.max(12, y-6));
-      }
-      draw();
+    // 描画
+    ctx.font = '14px system-ui';
+    for (const t of [...tracks.values()]) {
+      const [x,y,w,h] = t.box;
+      ctx.lineWidth=2; ctx.strokeStyle = t.counted ? '#00FF88' : '#ffaa00';
+      ctx.strokeRect(x,y,w,h);
+      const tag = t.counted ? 'counted' : `tracking ${t.streak}/${STREAK_N}`;
+      const tw = ctx.measureText(tag).width + 10;
+      ctx.fillStyle='rgba(0,0,0,0.5)'; ctx.fillRect(x, Math.max(0,y-20), tw, 20);
+      ctx.fillStyle='#fff'; ctx.fillText(tag, x+5, Math.max(12, y-6));
     }
 
     rafId = requestAnimationFrame(loop);
