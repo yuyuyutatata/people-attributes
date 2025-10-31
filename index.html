@@ -3,54 +3,52 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>来客属性カウンター（新規のみ・累積）</title>
+  <title>来客属性カウンター（1日1回・DB照合）</title>
   <style>
-    :root { --accent:#ff6b6b; --ok:#00c48c; --fg:#222; --muted:#777; }
-    body { font-family: system-ui,-apple-system,"Segoe UI",Roboto,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif; margin:16px; color:var(--fg); }
-    header { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-    button,label { font-size:14px; }
-    button { padding:6px 10px; border:1px solid #ddd; border-radius:8px; background:#fff; cursor:pointer; }
-    button:disabled { opacity:.5; cursor:not-allowed; }
-    .danger { background:#ffecec; border-color:#ffb5b5; color:#b10000; }
-    .ok { background:#eafff6; border-color:#b8f0e0; color:#066; }
-    .row { display:flex; gap:16px; margin-top:12px; }
-    .panel { background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:12px; }
-    #stage { width:640px; height:480px; display:block; background:#000; border-radius:12px; }
-    table { width:420px; border-collapse:collapse; }
-    th, td { border:1px solid #e5e7eb; padding:8px 10px; text-align:center; }
-    th { background:#fafafa; }
-    h2 { margin:0; }
-    .subnote { color:var(--muted); font-size:12px; margin-top:6px; }
-    .status { color:#555; font-size:13px; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans JP", sans-serif; margin: 0; padding: 16px; }
+    header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    button, label { font-size: 14px; }
+    #status { margin-left: 8px; color: #555; }
+    #wrap { display: grid; grid-template-columns: minmax(320px, 640px) 1fr; gap: 16px; align-items: start; }
+    #overlay { width: 100%; background: #000; border-radius: 6px; }
+    h2 { margin: 16px 0 8px; display: flex; align-items: center; gap: 8px; }
+    .danger { background: #ffe8ea; color:#b00020; border: 1px solid #ffb6bf; padding: 6px 10px; border-radius: 6px; cursor: pointer; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: center; }
+    th { background: #fafafa; }
+    small { color:#777; }
   </style>
-  <!-- Human (UMD) -->
-  <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/human/dist/human.js"></script>
-  <!-- アプリ本体 -->
-  <script defer src="./main.js"></script>
 </head>
 <body>
-  <header class="panel">
-    <button id="btnStart" class="ok">カメラ開始</button>
-    <button id="btnStop">停止</button>
+  <header>
+    <button id="btnStart">カメラ開始</button>
+    <button id="btnStop" disabled>停止</button>
     <button id="btnCsv">CSVダウンロード</button>
     <label><input type="checkbox" id="ckFront" /> 前面カメラを使う</label>
-    <span id="status" class="status">モデル準備中…</span>
+    <span id="status">準備中…</span>
   </header>
 
-  <div class="row">
-    <canvas id="stage" width="640" height="480"></canvas>
+  <div id="wrap">
+    <canvas id="overlay" width="640" height="480"></canvas>
 
-    <div class="panel">
-      <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
-        <h2>集計（新規のみ・累積）</h2>
-        <button id="btnResetAll" class="danger">DB含む全リセット</button>
-      </div>
+    <section>
+      <h2>
+        集計（1日）
+        <button id="btnResetAll" class="danger" title="DB と集計を初期化して、全員を新規扱いに戻します">DB含む全リセット</button>
+      </h2>
       <table>
-        <thead><tr><th>年齢層</th><th>男性</th><th>女性</th><th>不確実</th></tr></thead>
+        <thead>
+          <tr><th>年齢層</th><th>男性</th><th>女性</th><th>不確実</th></tr>
+        </thead>
         <tbody id="tbody"></tbody>
       </table>
-      <div class="subnote">※「初めて見かけた人」だけ1回カウント。DBに登録された人は二度とカウントされません。</div>
-    </div>
+      <p><small>※ 年齢は概ねの推定（例：10s=10代, 20s=20代…）。</small></p>
+    </section>
   </div>
+
+  <!-- Human v3.3.6（CDN） -->
+  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/dist/human.js"></script>
+  <!-- アプリ本体 -->
+  <script defer src="./main.js"></script>
 </body>
 </html>

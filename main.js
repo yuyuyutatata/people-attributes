@@ -1,7 +1,13 @@
-// === 来客属性カウンター：新規のみカウント（CDN優先・DB永続） ===
+// === 日次ユニーク集計 + 動いても1回だけ + IndexedDB 照合（DEBUG版） ===
 (async function boot() {
-  const canvas = document.getElementById('stage');
-  const ctx = canvas.getContext('2d');
+  const DEBUG = true;
+  const log = (...a) => DEBUG && console.log('[DBG]', ...a);
+  const warn = (...a) => console.warn('[WARN]', ...a);
+  const err  = (...a) => console.error('[ERR]', ...a);
+
+  // -------- DOM --------
+  const overlay  = document.getElementById('overlay');
+  const ctx      = overlay.getContext('2d');
   const btnStart = document.getElementById('btnStart');
   const btnStop  = document.getElementById('btnStop');
   const btnCsv   = document.getElementById('btnCsv');
@@ -11,328 +17,368 @@
   const btnResetAll = document.getElementById('btnResetAll');
 
   btnStop.disabled = true;
-  const delay = (ms)=>new Promise(r=>setTimeout(r,ms));
-  const todayStr = ()=>{ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
+  statusEl.textContent = '準備中…';
 
-  // ---------- Human 読み込み ----------
-  statusEl.textContent = 'モデル準備中…';
-  for (let i=0; i<200 && !window.Human; i++) await delay(50);
-  if (!window.Human) { statusEl.textContent='Human を読み込めませんでした'; return; }
+  // -------- Human --------
+  for (let i=0;i<200 && !window.Human;i++) await delay(100);
+  if (!window.Human) {
+    statusEl.textContent = 'Human 読み込み失敗';
+    btnStart.disabled = true; btnStop.disabled = true; return;
+  }
 
-  const CDN_MODELS = 'https://cdn.jsdelivr.net/npm/@vladmandic/human/models';
-  let modelBasePath = CDN_MODELS;
-  try {
-    const resp = await fetch('./models/face-detection.json', { method:'HEAD', cache:'no-store' }).catch(()=>null);
-    if (resp && resp.ok) modelBasePath = './models'; // ← ここが修正点（ok のときだけローカル）
-  } catch (_) {/* ignore */}
-
-  const video = document.createElement('video');
-  Object.assign(video.style, { position:'absolute', left:'-9999px', width:'1px', height:'1px' });
+  const video = Object.assign(document.createElement('video'), { muted:true, playsInline:true });
+  Object.assign(video.style, { display:'none', width:'0', height:'0', position:'absolute', opacity:'0' });
   document.body.appendChild(video);
 
-  const makeHuman = (base)=>new Human.Human({
-    backend:'webgl',
-    modelBasePath: base,
-    cacheSensitivity:0,
-    filter:{enabled:true, equalization:true},
-    face:{
-      enabled:true,
-      detector:{rotation:true, maxDetected:3},
+  const human = new Human.Human({
+    modelBasePath: 'https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/models',
+    face: {
+      detector:{ rotation:true, maxDetected:3 },
+      embedding:{ enabled:true },
+      descriptor:{ enabled:true },
+      age:{ enabled:true }, gender:{ enabled:true },
       mesh:false, iris:false,
-      description:{enabled:true},
-      descriptor:{enabled:true}
     },
-    body:{enabled:false}, hand:{enabled:false}, gesture:{enabled:false}
+    body:{enabled:false}, hand:{enabled:false}, gesture:{enabled:false},
+    filter:{enabled:true, equalization:true},
   });
+  await human.load().catch(()=>{});
+  statusEl.textContent = 'モデル準備完了';
 
-  let human = makeHuman(modelBasePath);
-  async function loadModelsWithFallback() {
-    try {
-      await human.load(); await human.warmup();
-      statusEl.textContent = `モデル準備完了（${modelBasePath.includes('http')?'CDN':'ローカル'}）`;
-    } catch (e) {
-      // ローカル読み込み失敗 → CDNへ再試行
-      if (modelBasePath !== CDN_MODELS) {
-        modelBasePath = CDN_MODELS;
-        human = makeHuman(modelBasePath);
-        try {
-          await human.load(); await human.warmup();
-          statusEl.textContent = 'モデル準備完了（CDNにフォールバック）';
-        } catch (e2) {
-          statusEl.textContent = 'モデル読み込み失敗: ' + e2.message;
-          throw e2;
-        }
-      } else {
-        statusEl.textContent = 'モデル読み込み失敗: ' + e.message;
-        throw e;
-      }
-    }
-  }
-  await loadModelsWithFallback();
-
-  // ---------- 集計 ----------
+  // -------- 日付・集計 --------
+  const todayStr = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  };
+  let currentDay = todayStr();
   const buckets = ['child','10s','20s','30s','40s','50s','60s+','unknown'];
   const blankCounts = ()=>{ const o={}; for(const b of buckets) o[b]={male:0,female:0,unknown:0}; return o; };
-  const kCounts = (d)=>`counts:${d}`;
-  function loadCounts(d){ try{ const raw=localStorage.getItem(kCounts(d)); return raw?JSON.parse(raw):blankCounts(); }catch{ return blankCounts(); } }
-  function saveCounts(d,obj){ localStorage.setItem(kCounts(d), JSON.stringify(obj)); }
-  let currentDay = todayStr();
+  const keyCounts = d => `counts:${d}`;
+  const loadCounts = d => { try{ const raw=localStorage.getItem(keyCounts(d)); return raw?JSON.parse(raw):blankCounts(); }catch{ return blankCounts(); } };
+  const saveCounts = (d,obj)=> localStorage.setItem(keyCounts(d), JSON.stringify(obj));
   let dayCounts = loadCounts(currentDay);
-  function renderTable(){ tbody.innerHTML=buckets.map(b=>{const c=dayCounts[b];return `<tr><td>${b}</td><td>${c.male}</td><td>${c.female}</td><td>${c.unknown}</td></tr>`}).join(''); }
+  const renderTable = ()=> tbody.innerHTML = buckets.map(b=> {
+    const c = dayCounts[b]; return `<tr><td>${b}</td><td>${c.male}</td><td>${c.female}</td><td>${c.unknown}</td></tr>`;
+  }).join('');
   renderTable();
 
-  // 一度カウントした DB id は永遠に加算しない
-  const KEY_COUNTED='countedEverIds';
-  let countedEver = (()=>{ try{return new Set(JSON.parse(localStorage.getItem(KEY_COUNTED)||'[]'));}catch{return new Set();} })();
-  const saveCounted=()=>localStorage.setItem(KEY_COUNTED, JSON.stringify([...countedEver]));
-
-  // 当日顔ハッシュ（DB不調時の二重防止）
-  const SITE_SECRET='FIXED_SECRET_12345';
-  const kHashSeen=(d)=>`hashSeen:${d}`;
-  let hashSeenToday = (()=>{
-    try { return new Set(JSON.parse(localStorage.getItem(kHashSeen(currentDay))||'[]')); }
-    catch { return new Set(); }
-  })();
-  const saveHashSeen=()=>localStorage.setItem(kHashSeen(currentDay), JSON.stringify([...hashSeenToday]));
-
-  // ---------- IndexedDB ----------
-  const DB_NAME='faces-db', STORE='vectors', DB_VER=3;
-  function openDB(){
+  // -------- IndexedDB（DEBUG強化）--------
+  const DB_NAME='faces-db', STORE='vectors', TARGET_VER=4; // ←デバッグで1つ上げる
+  function openDB() {
     return new Promise((resolve,reject)=>{
-      const req=indexedDB.open(DB_NAME, DB_VER);
-      req.onupgradeneeded=()=>{
-        const db=req.result;
-        if (!db.objectStoreNames.contains(STORE)) {
-          const os=db.createObjectStore(STORE,{keyPath:'id',autoIncrement:true});
-          os.createIndex('tsLast','tsLast');
-        }
+      const req = indexedDB.open(DB_NAME);
+      req.onerror = ()=> reject(req.error);
+      req.onsuccess = ()=>{
+        const db = req.result;
+        log('open success: name=', DB_NAME, 'ver=', db.version, 'stores=', [...db.objectStoreNames]);
+        if (db.objectStoreNames.contains(STORE)) return resolve(db);
+        const newVer = Math.max(db.version+1, TARGET_VER);
+        log('upgrade to create store:', STORE, '→ version', newVer);
+        db.close();
+        const req2 = indexedDB.open(DB_NAME, newVer);
+        req2.onupgradeneeded = ()=>{
+          const db2 = req2.result;
+          if (!db2.objectStoreNames.contains(STORE)) {
+            const os = db2.createObjectStore(STORE, { keyPath:'id', autoIncrement:true });
+            os.createIndex('tsLast','tsLast');
+            log('created store:', STORE);
+          }
+        };
+        req2.onerror = ()=> reject(req2.error);
+        req2.onsuccess = ()=> { log('upgrade done ver=', req2.result.version); resolve(req2.result); };
       };
-      req.onsuccess=()=>resolve(req.result);
-      req.onerror =()=>reject(req.error);
     });
   }
-  async function dbAll(){
-    const db=await openDB();
+  async function dbGetAll(){
+    const db = await openDB();
     return new Promise((res,rej)=>{
-      const tx=db.transaction(STORE,'readonly');
-      const rq=tx.objectStore(STORE).getAll();
-      rq.onsuccess=()=>res(rq.result||[]);
-      rq.onerror  =()=>rej(rq.error);
+      const tx = db.transaction(STORE,'readonly');
+      const rq = tx.objectStore(STORE).getAll();
+      rq.onsuccess=()=>{ log('getAll count=', (rq.result||[]).length); res(rq.result||[]); };
+      rq.onerror  =()=> rej(rq.error);
     });
   }
-  async function dbAdd(rec){
-    const db=await openDB();
+  async function dbGetById(id){
+    const db = await openDB();
     return new Promise((res,rej)=>{
-      const tx=db.transaction(STORE,'readwrite');
-      const rq=tx.objectStore(STORE).add(rec);
-      rq.onsuccess=()=>res(rq.result);
-      rq.onerror  =()=>rej(rq.error);
+      const rq = db.transaction(STORE,'readonly').objectStore(STORE).get(id);
+      rq.onsuccess=()=> res(rq.result||null);
+      rq.onerror  =()=> rej(rq.error);
     });
   }
-  async function dbUpdate(id,patch){
-    const db=await openDB();
+  // put → 生成IDを返す（失敗時1回だけ再試行）
+  async function dbPut(rec, _retry=false){
+    const db = await openDB();
     return new Promise((res,rej)=>{
-      const tx=db.transaction(STORE,'readwrite');
-      const os=tx.objectStore(STORE);
-      const get=os.get(id);
-      get.onsuccess=()=>{ const obj=Object.assign(get.result||{},patch); os.put(obj); };
-      tx.oncomplete=()=>res();
-      tx.onerror   =()=>rej(tx.error);
+      const tx = db.transaction(STORE,'readwrite');
+      const rq = tx.objectStore(STORE).put(rec);
+      let insertedId = null;
+      rq.onsuccess = ()=> { insertedId = rq.result; };
+      tx.oncomplete=()=>{ log('put complete id=', insertedId); res(insertedId); };
+      tx.onerror   = async ()=>{
+        err('put failed:', tx.error);
+        if (!_retry) {
+          warn('retry put once');
+          try { const id2 = await dbPut(rec, true); res(id2); } catch(e){ rej(e); }
+        } else rej(tx.error);
+      };
     });
   }
-  function cosSim(a,b){ let dot=0,na=0,nb=0,L=Math.min(a.length,b.length); for(let i=0;i<L;i++){const x=a[i],y=b[i];dot+=x*y;na+=x*x;nb+=y*y;} return (na&&nb)? dot/(Math.sqrt(na)*Math.sqrt(nb)):0; }
-  async function findNearestInDB(vec, th){
-    const all=await dbAll();
-    let best=null, sBest=-1;
-    for(const r of all){ if(!r.vec) continue; const s=cosSim(vec,new Float32Array(r.vec)); if(s>sBest){ sBest=s; best=r; } }
-    return (best && sBest>=th) ? {rec:best, sim:sBest} : null;
+  async function dbUpdate(id, patch){
+    const rec = await dbGetById(id);
+    if (!rec) { warn('update target missing id=', id); return null; }
+    return dbPut(Object.assign(rec, patch));
+  }
+  async function dbDeleteByIds(ids){
+    if (!ids.length) return;
+    const db = await openDB();
+    return new Promise((res,rej)=>{
+      const tx = db.transaction(STORE,'readwrite');
+      const os = tx.objectStore(STORE);
+      ids.forEach(id => os.delete(id));
+      tx.oncomplete=()=> res();
+      tx.onerror   =()=> rej(tx.error);
+    });
+  }
+  async function dbMaintenance(){
+    try{
+      const THIRTY=30*24*60*60*1000, MAX_KEEP=10000;
+      const all = await dbGetAll(); const now = Date.now();
+      const oldIds = all.filter(r=> (r.tsLast||r.tsFirst||0) < now-THIRTY).map(r=>r.id);
+      if (oldIds.length) { log('delete old ids:', oldIds.length); await dbDeleteByIds(oldIds); }
+      const rest = (await dbGetAll()).sort((a,b)=>(a.tsLast||a.tsFirst)-(b.tsLast||b.tsFirst));
+      if (rest.length>MAX_KEEP) await dbDeleteByIds(rest.slice(0,rest.length-MAX_KEEP).map(r=>r.id));
+    }catch(e){ warn('maintenance skipped', e?.message||e); }
+  }
+  await dbMaintenance();
+
+  // -------- 類似度・埋め込み --------
+  const cosSim=(a,b)=>{ let dot=0,na=0,nb=0,L=Math.min(a.length,b.length); for(let i=0;i<L;i++){const x=a[i],y=b[i]; dot+=x*y; na+=x*x; nb+=y*y;} return (na&&nb)?dot/(Math.sqrt(na)*Math.sqrt(nb)):0; };
+  function normalize(v){ const out=new Float32Array(v.length); let n=0; for(let i=0;i<v.length;i++){n+=v[i]*v[i];} const s=n?1/Math.sqrt(n):1; for(let i=0;i<v.length;i++) out[i]=v[i]*s; return out; }
+  async function faceEmbedding(face){
+    const emb = face.embedding || face.descriptor;
+    if (!emb || !Array.isArray(emb) || emb.length===0) return null;
+    return normalize(new Float32Array(emb));
+  }
+  async function findNearestInDB(vec, TH=0.998){
+    const all = await dbGetAll();
+    let best=null, bestSim=-1;
+    for(const r of all){ if(!r.vec) continue; const s = cosSim(vec, new Float32Array(r.vec)); if (s>bestSim){ bestSim=s; best=r; } }
+    log('nearest sim=', bestSim.toFixed(4), 'id=', best?.id);
+    return (best && bestSim>=TH) ? {rec:best, sim:bestSim} : null;
   }
 
-  // ---------- トラッキング ----------
-  const MIN_FACE_SCORE=0.60, MIN_AREA_RATIO=0.03, STREAK_N=6;
-  const SIM_MIN=0.995, IOU_MIN=0.35, DIST_MAX_RATIO=0.15;
-  const tracks=new Map(); let nextTrackId=1; const TRACK_MAX_AGE=2000;
+  // -------- トラッキング（緩和）--------
+  const MIN_FACE_SCORE=0.70, MIN_AREA_RATIO=0.05;
+  const STREAK_N=4, SIM_MIN=0.98, IOU_MIN=0.20, DIST_MAX_RATIO=0.25;
+  const iou=(b1,b2)=>{const[a,b,c,d]=b1,[e,f,g,h]=b2;const xa=Math.max(a,e),ya=Math.max(b,f);const xb=Math.min(a+c,e+g),yb=Math.min(b+d,f+h);const inter=Math.max(0,xb-xa)*Math.max(0,yb-ya);const uni=c*d+g*h-inter;return uni>0?inter/uni:0;};
+  const centerDist=(b1,b2)=>{const c1=[b1[0]+b1[2]/2,b1[1]+b1[3]/2],c2=[b2[0]+b2[2]/2,b2[1]+b2[3]/2];return Math.hypot(c1[0]-c2[0],c1[1]-c2[1]);};
+
   const people=[]; const MEMORY_SIM_TH=0.998;
-  function normalize(v){ const out=new Float32Array(v.length); let n=0; for(let i=0;i<v.length;i++){const x=v[i]; n+=x*x;} const s=n?1/Math.sqrt(n):1; for(let i=0;i<v.length;i++) out[i]=v[i]*s; return out; }
-  function vecHash(vec, day){ let s=''; for(let i=0;i<vec.length;i++) s+=(Math.round(vec[i]/0.02)*0.02).toFixed(2)+','; return `${day}|${SITE_SECRET}|${s}`; }
-  const iou=(b1,b2)=>{ const [x1,y1,w1,h1]=b1,[x2,y2,w2,h2]=b2; const xa=Math.max(x1,x2),ya=Math.max(y1,y2); const xb=Math.min(x1+w1,x2+w2),yb=Math.min(y1+h1,y2+h2); const inter=Math.max(0,xb-xa)*Math.max(0,yb-ya); const uni=w1*h1+w2*h2-inter; return uni>0? inter/uni:0; };
-  const centerDist=(b1,b2)=>{ const c1x=b1[0]+b1[2]/2,c1y=b1[1]+b1[3]/2; const c2x=b2[0]+b2[2]/2,c2y=b2[1]+b2[3]/2; return Math.hypot(c1x-c2x,c1y-c2y); };
-  function cleanupTracks(now){ for(const [id,t] of tracks) if(now - t.lastTs > TRACK_MAX_AGE) tracks.delete(id); }
-  function addPersonVec(vec){ for(const p of people){ for(const v of p.vecs){ if(cosSim(vec,v)>=MEMORY_SIM_TH){ p.vecs.push(vec); if(p.vecs.length>3)p.vecs.shift(); return; } } } people.push({vecs:[vec]}); }
+  const addPersonVec = vec => {
+    for(const p of people){ for(const v of p.vecs){ if (cosSim(vec,v)>=MEMORY_SIM_TH){ p.vecs.push(vec); if(p.vecs.length>3)p.vecs.shift(); return; } } }
+    people.push({ vecs:[vec] });
+  };
+
+  let nextTrackId=1;
+  const tracks=new Map(); const TRACK_MAX_AGE=2000;
+  function cleanupTracks(now){ for(const [id,t] of tracks){ if (now - t.lastTs > TRACK_MAX_AGE) tracks.delete(id); } }
   function assignDetectionsToTracks(dets){
     const now=performance.now(); cleanupTracks(now);
     const unassigned=new Set(dets.map((_,i)=>i));
-    const diag=Math.hypot(canvas.width,canvas.height)||1;
+    const entries=[...tracks.values()];
+    const diag=Math.hypot(overlay.width, overlay.height)||1;
+
+    if (entries.length===1 && dets.length===1){
+      const t=entries[0], d=dets[0];
+      t.box=d.box; t.vec=d.vec; t.lastTs=now; t.streak=Math.min(t.streak+1, STREAK_N);
+      unassigned.delete(0); return [...unassigned];
+    }
+
     const pairs=[];
-    for(const t of [...tracks.values()]){
+    for(const t of entries){
       for(let i=0;i<dets.length;i++){
         const d=dets[i];
-        const dist=centerDist(t.box,d.box)/diag;
-        const ov=iou(t.box,d.box);
-        const sim=t.vec&&d.vec?cosSim(t.vec,d.vec):0;
-        const cost=0.7*(1-sim)+0.2*dist+0.1*(1-ov);
+        const dist=centerDist(t.box,d.box)/diag, ov=iou(t.box,d.box), sim=(t.vec && d.vec)?cosSim(t.vec,d.vec):0;
+        const cost = 0.7*(1-sim)+0.2*dist+0.1*(1-ov);
         pairs.push({tid:t.id,i,cost,sim,dist,ov});
       }
     }
     pairs.sort((a,b)=>a.cost-b.cost);
+
     const usedT=new Set(), usedD=new Set();
     for(const p of pairs){
-      if(usedT.has(p.tid)||usedD.has(p.i)) continue;
-      if(p.sim>=SIM_MIN && p.ov>=IOU_MIN && p.dist<=DIST_MAX_RATIO){
+      if (usedT.has(p.tid) || usedD.has(p.i)) continue;
+      const passSim=p.sim>=SIM_MIN, passIOU=p.ov>=IOU_MIN, passDist=p.dist<=DIST_MAX_RATIO;
+      if ((passSim&&passIOU)||(passSim&&passDist)||(passIOU&&passDist)){
         const t=tracks.get(p.tid), d=dets[p.i];
-        t.box=d.box; t.vec=d.vec; t.face=d.face;
-        t.lastTs=now; t.streak=Math.min(t.streak+1,STREAK_N);
+        t.box=d.box; t.vec=d.vec; t.lastTs=now; t.streak=Math.min(t.streak+1, STREAK_N);
         usedT.add(p.tid); usedD.add(p.i); unassigned.delete(p.i);
       }
     }
     return [...unassigned];
   }
-  function createTrack(det){ const now=performance.now(); tracks.set(nextTrackId,{id:nextTrackId++,box:det.box,vec:det.vec,face:det.face,lastTs:now,streak:1,counted:false}); }
+  function createTrack(det){
+    const now=performance.now();
+    tracks.set(nextTrackId,{ id:nextTrackId++, box:det.box, vec:det.vec, lastTs:now, streak:1, counted:false });
+  }
 
-  // ---------- カメラ ----------
-  let running=false, stream=null, rafId=null, lastTick=0, dbHealthy=true;
+  // -------- カメラ --------
+  let running=false, stream=null, rafId=null, lastTick=0;
+
   async function startCamera(){
     const facing = ckFront.checked ? 'user' : 'environment';
     stream = await navigator.mediaDevices.getUserMedia({
       video:{ facingMode:{ideal:facing}, width:{ideal:640}, height:{ideal:480} },
       audio:false
     });
-    video.srcObject = stream; await video.play();
-    canvas.width  = video.videoWidth  || 640;
-    canvas.height = video.videoHeight || 480;
+    video.srcObject=stream; await video.play();
+    overlay.width=video.videoWidth||640; overlay.height=video.videoHeight||480;
     running=true; btnStart.disabled=true; btnStop.disabled=false;
-    statusEl.textContent='実行中（新規のみカウント）';
+    statusEl.textContent='実行中（デバッグ版）';
     loop();
   }
   function stopCamera(){
-    running=false; if(rafId) cancelAnimationFrame(rafId);
-    if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
+    running=false; if (rafId) cancelAnimationFrame(rafId);
+    if (stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
     btnStart.disabled=false; btnStop.disabled=true; statusEl.textContent='停止';
   }
 
   async function loop(ts){
-    if(!running) return;
+    if (!running) return;
+
     const dnow=todayStr();
-    if(dnow!==currentDay){ currentDay=dnow; dayCounts=loadCounts(currentDay); hashSeenToday=new Set(JSON.parse(localStorage.getItem(kHashSeen(currentDay))||'[]')); renderTable(); }
-    if(ts && ts-lastTick<100){ rafId=requestAnimationFrame(loop); return; }
-    lastTick=ts||performance.now();
+    if (dnow!==currentDay){ currentDay=dnow; dayCounts=loadCounts(currentDay); renderTable(); }
+
+    if (ts && ts-lastTick<100){ rafId=requestAnimationFrame(loop); return; }
+    lastTick = ts || performance.now();
 
     const result = await human.detect(video);
-    ctx.clearRect(0,0,canvas.width,canvas.height);
-    ctx.drawImage(video,0,0,canvas.width,canvas.height);
 
-    const frameArea=canvas.width*canvas.height;
+    ctx.clearRect(0,0,overlay.width,overlay.height);
+    ctx.drawImage(video,0,0,overlay.width,overlay.height);
+
+    const frameArea=overlay.width*overlay.height;
     const faces=(result.face||[]).filter(f=>{
       const [x,y,w,h]=f.box;
-      const okScore = typeof f.score==='number' ? f.score>=MIN_FACE_SCORE : true;
-      const okArea  = (w*h)/frameArea >= MIN_AREA_RATIO;
-      return okScore && okArea && Array.isArray(f.descriptor);
+      const okScore = (typeof f.score!=='number') ? true : f.score>=0.70;
+      const okArea  = (w*h)/frameArea>=0.05;
+      return okScore && okArea;
     });
 
     const detections=[];
     for(const f of faces){
-      const vec=normalize(new Float32Array(f.descriptor));
-      detections.push({box:f.box, vec, face:f});
+      const vec = await faceEmbedding(f);
+      if (!vec) continue;
+      detections.push({ box:f.box, vec, age:f.age?Math.round(f.age):null, gender:(f.gender||'unknown').toLowerCase() });
     }
 
-    const unassigned=assignDetectionsToTracks(detections);
-    for(const idx of unassigned) createTrack(detections[idx]);
+    const unassignedIdx = assignDetectionsToTracks(detections);
+    for(const idx of unassignedIdx) createTrack(detections[idx]);
 
     for(const t of [...tracks.values()]){
-      if(t.streak<STREAK_N || t.counted || !t.vec) continue;
-
-      const todayHash = vecHash(t.vec, currentDay);
-      if (hashSeenToday.has(todayHash)) { t.counted=true; continue; }
-
-      try{
-        if(!dbHealthy){ t.counted=true; continue; }
+      if (t.streak>=STREAK_N && !t.counted && t.vec){
+        let wrote = false;
         const nearest = await findNearestInDB(t.vec, 0.998);
-        if(nearest){
-          await dbUpdate(nearest.rec.id, { tsLast:Date.now(), seenCount:(nearest.rec.seenCount||0)+1 });
-          hashSeenToday.add(todayHash); localStorage.setItem(kHashSeen(currentDay), JSON.stringify([...hashSeenToday]));
-        } else {
-          const loose = await findNearestInDB(t.vec, 0.97);
-          if(loose){
-            await dbUpdate(loose.rec.id, { tsLast:Date.now(), seenCount:(loose.rec.seenCount||0)+1 });
-            hashSeenToday.add(todayHash); localStorage.setItem(kHashSeen(currentDay), JSON.stringify([...hashSeenToday]));
-          } else {
-            // 完全新規：登録→一度だけ加算（以後は ID で永久ブロック）
-            const attr = estimateAttr(t.face);
-            const now  = Date.now();
-            const newId = await dbAdd({ vec:Array.from(t.vec), tsFirst:now, tsLast:now, seenCount:1, attrs:attr });
-            if(!countedEver.has(newId)){
-              countedEver.add(newId); saveCounted();
-              dayCounts[attr.bucket][attr.gkey]+=1; saveCounts(currentDay,dayCounts); renderTable();
-            }
-            hashSeenToday.add(todayHash); localStorage.setItem(kHashSeen(currentDay), JSON.stringify([...hashSeenToday]));
-          }
+        if (nearest){
+          log('UPDATE existing id=', nearest.rec.id);
+          await dbUpdate(nearest.rec.id, { tsLast:Date.now(), lastCountedDay:currentDay, seenCount:(nearest.rec.seenCount||0)+1 });
+          wrote = true;
+        }else{
+          const attr = estimateAttrFromDetections(t.vec, detections);
+          const rec = { vec:Array.from(t.vec), tsFirst:Date.now(), tsLast:Date.now(), seenCount:1, lastCountedDay:currentDay, attrs:attr };
+          const newId = await dbPut(rec).catch(e=>{ err('insert failed', e); return null; });
+          if (newId!=null){ log('INSERT new id=', newId); wrote = true; }
+          else { warn('INSERT returned null id'); }
         }
-      } catch(e){
-        console.warn('DB error:', e);
-        dbHealthy=false; statusEl.textContent='DB不調: カウント停止中（再読込で復帰）';
+
+        // UIカウントはDB結果に関わらず実施（ここで進まないときはロジック切り分け）
+        const attr2 = estimateAttrFromDetections(t.vec, detections);
+        dayCounts[attr2.bucket][attr2.gkey] += 1; saveCounts(currentDay, dayCounts); renderTable();
+
+        if (!wrote) {
+          console.warn('%cDBに書き込めませんでした（この行が見えたらスクショください）','color:#d00;font-weight:bold');
+        }
+        addPersonVec(t.vec);
+        t.counted = true;
       }
-      t.counted=true;
     }
 
-    ctx.font='13px system-ui';
+    // 可視化
+    ctx.font='14px system-ui';
     for(const t of [...tracks.values()]){
       const [x,y,w,h]=t.box;
-      ctx.lineWidth=2; ctx.strokeStyle=t.counted?'#00C48C':'#FFA400';
+      ctx.lineWidth=2; ctx.strokeStyle=t.counted?'#00FF88':'#ffaa00';
       ctx.strokeRect(x,y,w,h);
       const tag=t.counted?'counted':`tracking ${t.streak}/${STREAK_N}`;
-      const tw=ctx.measureText(tag).width+8;
-      ctx.fillStyle='rgba(0,0,0,.55)'; ctx.fillRect(x,Math.max(0,y-18),tw,18);
-      ctx.fillStyle='#fff'; ctx.fillText(tag,x+4,Math.max(12,y-4));
+      const tw=ctx.measureText(tag).width+10;
+      ctx.fillStyle='rgba(0,0,0,0.5)'; ctx.fillRect(x,Math.max(0,y-20),tw,20);
+      ctx.fillStyle='#fff'; ctx.fillText(tag,x+5,Math.max(12,y-6));
     }
 
-    rafId=requestAnimationFrame(loop);
+    rafId = requestAnimationFrame(loop);
   }
 
-  function estimateAttr(face){
-    const age = face.age ? Math.round(face.age) : null;
-    const bucket = (age==null)?'unknown'
-      : age<13?'child'
-      : age<20?'10s'
-      : age<30?'20s'
-      : age<40?'30s'
-      : age<50?'40s'
-      : age<60?'50s':'60s+';
-    const g=(face.gender||'').toLowerCase();
-    const gkey = g.startsWith('f')?'female':(g.startsWith('m')?'male':'unknown');
-    return { bucket, gkey };
-  }
-
-  // ---------- CSV / リセット ----------
-  btnStart.addEventListener('click', async ()=>{ try{ await startCamera(); }catch(e){ statusEl.textContent='カメラ開始失敗: '+e.message; }});
+  // -------- イベント --------
+  btnStart.addEventListener('click', async ()=>{ try{ await startCamera(); }catch(e){ statusEl.textContent='開始失敗: '+e.message; }});
   btnStop .addEventListener('click', stopCamera);
   btnCsv  .addEventListener('click', ()=>{
     const lines=['bucket,male,female,unknown'];
     for(const b of buckets){ const c=dayCounts[b]; lines.push([b,c.male,c.female,c.unknown].join(',')); }
-    const blob=new Blob([lines.join('\n')],{type:'text/csv'}); const url=URL.createObjectURL(blob);
-    const a=Object.assign(document.createElement('a'),{href:url,download:`daily_attributes_${currentDay}.csv`}); a.click(); URL.revokeObjectURL(url);
+    const blob=new Blob([lines.join('\n')],{type:'text/csv'});
+    const url=URL.createObjectURL(blob);
+    const a=Object.assign(document.createElement('a'),{href:url,download:`daily_attributes_${currentDay}.csv`});
+    a.click(); URL.revokeObjectURL(url);
   });
 
+  // -------- 全リセット（据え置き）--------
   function clearAllDailyStorage(){
-    const del=[]; for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i);
-      if(k && (k.startsWith('counts:')||k.startsWith('hashSeen:')||k===KEY_COUNTED)) del.push(k);
-    } del.forEach(k=>localStorage.removeItem(k));
+    const del=[]; for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); if(k && (k.startsWith('counts:')||k.startsWith('uniq:'))) del.push(k); }
+    del.forEach(k=>localStorage.removeItem(k));
   }
-  function deleteFacesDB(){ return new Promise((resolve,reject)=>{ const rq=indexedDB.deleteDatabase(DB_NAME); rq.onsuccess=()=>resolve(); rq.onerror=()=>reject(rq.error); rq.onblocked=()=>reject(new Error('DB deletion blocked')); }); }
+  function deleteFacesDB(){
+    return new Promise((resolve,reject)=>{
+      const req = indexedDB.deleteDatabase(DB_NAME);
+      req.onsuccess=()=>resolve('deleted');
+      req.onerror  =()=>reject(req.error);
+      req.onblocked=()=>reject(new Error('DB deletion blocked (close other tabs or reload)'));
+    });
+  }
   async function resetAll(){
-    if(!confirm('DBと集計・既視記録を全削除します。よろしいですか？')) return;
-    if(running) stopCamera();
+    if(!confirm('DBと集計をすべて削除します。よろしいですか？')) return;
+    if (running) stopCamera?.();
     clearAllDailyStorage();
-    try{ await deleteFacesDB(); }catch(e){ alert('DB削除がブロックされました。他タブを閉じて再実行してください。\n'+(e?.message||e)); }
-    tracks.clear(); people.length=0; nextTrackId=1;
+    try{ await deleteFacesDB(); }catch(e){ alert('DB削除がブロックされました。タブを閉じて再試行：'+(e?.message||e)); }
+    tracks.clear?.(); if(Array.isArray(people)) people.length=0; nextTrackId=1;
     currentDay=todayStr(); dayCounts=blankCounts(); saveCounts(currentDay,dayCounts); renderTable();
-    countedEver=new Set(); saveCounted();
-    hashSeenToday=new Set(); saveHashSeen();
-    statusEl.textContent='全リセット完了。必要なら「カメラ開始」を押してください。';
+    statusEl.textContent='全リセット完了（デバッグ版）';
   }
-  btnResetAll.addEventListener('click', resetAll);
+  btnResetAll?.addEventListener('click', resetAll);
 
+  // -------- 初期表示 --------
   if (!('mediaDevices' in navigator && 'getUserMedia' in navigator.mediaDevices))
-    statusEl.textContent='このブラウザはカメラ取得に未対応です';
+    statusEl.textContent='このブラウザはカメラ未対応';
   else
     statusEl.textContent='「カメラ開始」を押してください（HTTPS必須）';
+
+  // -------- Helpers --------
+  function delay(ms){ return new Promise(r=>setTimeout(r,ms)); }
+  function estimateAttrFromDetections(vec, dets){
+    let best=null, bestSim=-1;
+    for(const d of dets){ const s=cosSim(vec,d.vec); if(s>bestSim){ bestSim=s; best=d; } }
+    let bucket='unknown', gkey='unknown';
+    if (best){
+      const age = best.age;
+      bucket = (age==null)?'unknown'
+        : age<13?'child'
+        : age<20?'10s'
+        : age<30?'20s'
+        : age<40?'30s'
+        : age<50?'40s'
+        : age<60?'50s':'60s+';
+      const g=(best.gender||'');
+      gkey = g.startsWith('f')?'female':(g.startsWith('m')?'male':'unknown');
+    }
+    return { bucket, gkey };
+  }
 })();
