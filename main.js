@@ -65,8 +65,8 @@
   const DB_NAME='faces-db', STORE='vectors';
 
   async function openDBEnsure() {
-    // 既存を開く（バージョン指定なし）
-    const db = await new Promise((resolve,reject)=>{
+    // 既存 open（v未指定）
+    const base = await new Promise((resolve,reject)=>{
       const req = indexedDB.open(DB_NAME);
       req.onsuccess = () => resolve(req.result);
       req.onerror   = () => reject(req.error);
@@ -78,11 +78,10 @@
         }
       };
     });
-    if (db.objectStoreNames.contains(STORE)) return db;
+    if (base.objectStoreNames.contains(STORE)) return base;
 
     // ストアが無ければ version+1 で作成
-    const newVersion = db.version + 1;
-    db.close();
+    const newVersion = base.version + 1; base.close();
     return new Promise((resolve,reject)=>{
       const req2 = indexedDB.open(DB_NAME, newVersion);
       req2.onupgradeneeded = () => {
@@ -97,35 +96,42 @@
     });
   }
 
-  // ★ ここを全面修正：各操作は IDBRequest の onSuccess を待って“値”を返す
+  // 常に“配列/値”を返す安全版
   async function dbGetAll() {
-    const db = await openDBEnsure();
-    return new Promise((res, rej) => {
-      const tx = db.transaction(STORE, 'readonly');
-      const os = tx.objectStore(STORE);
-      const rq = os.getAll();
-      rq.onsuccess = () => res(Array.isArray(rq.result) ? rq.result : []);
-      rq.onerror   = () => rej(rq.error);
-    });
+    try{
+      const db = await openDBEnsure();
+      return await new Promise((res, rej) => {
+        const tx = db.transaction(STORE, 'readonly');
+        const rq = tx.objectStore(STORE).getAll();
+        rq.onsuccess = () => res(Array.isArray(rq.result) ? rq.result : []);
+        rq.onerror   = () => rej(rq.error);
+      });
+    }catch(e){
+      console.warn('dbGetAll failed:', e);
+      return []; // 失敗時は空配列（=既知なし扱い）→ 後段で“安全側”ガードあり
+    }
   }
   async function dbGetById(id) {
-    const db = await openDBEnsure();
-    return new Promise((res, rej) => {
-      const tx = db.transaction(STORE, 'readonly');
-      const os = tx.objectStore(STORE);
-      const rq = os.get(id);
-      rq.onsuccess = () => res(rq.result || null);
-      rq.onerror   = () => rej(rq.error);
-    });
+    try{
+      const db = await openDBEnsure();
+      return await new Promise((res, rej) => {
+        const tx = db.transaction(STORE, 'readonly');
+        const rq = tx.objectStore(STORE).get(id);
+        rq.onsuccess = () => res(rq.result || null);
+        rq.onerror   = () => rej(rq.error);
+      });
+    }catch(e){ console.warn('dbGetById failed:', e); return null; }
   }
   async function dbPut(rec) {
-    const db = await openDBEnsure();
-    return new Promise((res, rej) => {
-      const tx = db.transaction(STORE, 'readwrite');
-      tx.objectStore(STORE).put(rec);
-      tx.oncomplete = () => res(true);
-      tx.onerror    = () => rej(tx.error);
-    });
+    try{
+      const db = await openDBEnsure();
+      return await new Promise((res, rej) => {
+        const tx = db.transaction(STORE, 'readwrite');
+        tx.objectStore(STORE).put(rec);
+        tx.oncomplete = () => res(true);
+        tx.onerror    = () => rej(tx.error);
+      });
+    }catch(e){ console.warn('dbPut failed:', e); return false; }
   }
   async function dbUpdate(id, patch) {
     const cur = await dbGetById(id);
@@ -141,9 +147,19 @@
     if (!emb || !Array.isArray(emb) || emb.length===0) return null;
     return normalize(new Float32Array(emb));
   }
+
+  // セッション内ハッシュ（DB遅延での二重加算防止）
+  const sessionHashes = new Set();
+  const quickHash = (vec) => {
+    // 先頭128次元を0.02刻みで量子化 → 文字列キー
+    const L = Math.min(128, vec.length), q = new Array(L);
+    for (let i=0;i<L;i++) q[i] = Math.round(vec[i]/0.02); // 符号含む整数
+    return q.join('.');
+  };
+
   async function findNearestInDB(vec, TH=0.998){
     try{
-      const all = await dbGetAll();        // ← 常に “配列” が返るようになった
+      const all = await dbGetAll();      // 必ず配列
       let best=null, bestSim=-1;
       for(const r of all){
         if (!r.vec) continue;
@@ -152,8 +168,9 @@
       }
       return (best && bestSim>=TH) ? { rec:best, sim:bestSim } : null;
     }catch(e){
-      console.warn('DB lookup skipped:', e);
-      return null;
+      console.warn('findNearestInDB failed:', e);
+      // ★ 安全側：照合失敗時は「カウントしない」方針にするため null の代わりに特別フラグを返す
+      return { dbError:true };
     }
   }
 
@@ -282,30 +299,33 @@
     // 確定トラックだけ判定
     for(const t of [...tracks.values()]){
       if(t.streak>=STREAK_N && !t.counted && t.vec){
-        try{
-          const attr=estimateAttrFromDetections(t.vec, detections);
-          const nearest=await findNearestInDB(t.vec, 0.998);
+        const h = quickHash(t.vec);
+        if (sessionHashes.has(h)) { t.counted = true; continue; }  // セッション重複防止
+        const attr=estimateAttrFromDetections(t.vec, detections);
 
-          if(nearest){
-            // 既知：絶対にカウントしない（記録更新のみ）
-            await dbUpdate(nearest.rec.id, { tsLast: Date.now(), seenCount:(nearest.rec.seenCount||0)+1 });
-            addPersonVec(t.vec);
-          }else{
-            // 新規：DB登録 → この瞬間だけ +1
-            const now=Date.now();
-            await dbPut({
-              vec: Array.from(t.vec),
-              tsFirst: now, tsLast: now,
-              seenCount: 1,
-              attrs: attr
-            });
+        const match = await findNearestInDB(t.vec, 0.998);
+        if (match && match.dbError) { // 照合失敗は安全側：一切カウントしない
+          // 何もしない（次フレームでもう一度照合）
+        } else if (match && match.rec) {
+          // 既知：絶対にカウントしない（最終観測のみ更新）
+          await dbUpdate(match.rec.id, { tsLast: Date.now(), seenCount:(match.rec.seenCount||0)+1 });
+          sessionHashes.add(h);
+          addPersonVec(t.vec);
+          t.counted = true;
+        } else {
+          // 新規：DB登録 → この瞬間だけ +1
+          const now=Date.now();
+          const ok = await dbPut({ vec:Array.from(t.vec), tsFirst:now, tsLast:now, seenCount:1, attrs:attr });
+          if (ok) {
             addDailyCount(attr);
+            sessionHashes.add(h);
             addPersonVec(t.vec);
+            t.counted = true;
+          } else {
+            // 登録に失敗したら安全側で加算もしない
+            console.warn('dbPut failed; count skipped.');
           }
-        }catch(e){
-          console.warn('count step skipped due to DB error:', e);
         }
-        t.counted = true; // 同一トラックの二重加算防止
       }
     }
 
@@ -356,7 +376,7 @@
     if(running) stopCamera?.();
     clearAllDailyStorage();
     try{ await deleteFacesDB(); }catch(e){ alert('DB削除がブロックされました。別タブを閉じてリロードしてください。'); }
-    tracks.clear?.(); people.length=0; nextTrackId=1;
+    tracks.clear?.(); people.length=0; nextTrackId=1; sessionHashes.clear();
     currentDay=todayStr(); dayCounts=blankCounts(); saveCounts(currentDay,dayCounts); renderTable();
     statusEl.textContent='全リセット完了';
   }
