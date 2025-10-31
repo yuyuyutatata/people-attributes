@@ -127,7 +127,7 @@
   let nextTrackId = 1;
   const tracks = new Map(); // id -> {id, box, vec, lastTs, streak, counted, hash}
   const TRACK_MAX_AGE = 2000;  // ms
-  const STREAK_N = 6;          // 連続フレームでの確定条件（厳しめ）
+  const STREAK_N = 15;          // 連続フレームでの確定条件（厳しめ）
   const COST_SIM_W = 0.7;      // 顔類似の重み（高）
   const COST_DIST_W = 0.2;     // 位置距離の重み
   const COST_IOU_W  = 0.1;     // IoU は「1-IOU」でコストに
@@ -164,7 +164,7 @@
 
     const usedT = new Set(), usedD = new Set();
     const matches = [];
-    const SIM_MIN = 0.995;   // 顔ベクトルの最低類似
+    const SIM_MIN = 0.999;   // 顔ベクトルの最低類似
     const IOU_MIN = 0.35;    // 位置重なり
     const DIST_MAX = 0.15;   // 画面対角比での距離上限
 
