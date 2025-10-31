@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>来客属性カウンター（初回のみカウント・DB照合）</title>
+  <title>来客属性カウンター（新規のみカウント）</title>
   <style>
     body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";margin:0;padding:16px;background:#fafafa;color:#222}
     header{display:flex;gap:8px;align-items:center;margin-bottom:8px}
@@ -40,7 +40,7 @@
 
     <section class="panel">
       <h2>
-        集計（初回のみ加算）
+        集計（新規のみ・累積）
         <button id="btnResetAll" class="btn-danger" style="margin-left:auto">DB含む全リセット</button>
       </h2>
       <div class="body">
@@ -48,9 +48,9 @@
           <thead>
             <tr><th>年齢層</th><th>男性</th><th>女性</th><th>不確実</th></tr>
           </thead>
-        <tbody id="tbody"></tbody>
+          <tbody id="tbody"></tbody>
         </table>
-        <div class="muted">※ 同一人物は**一生で一度だけ**加算。以後は何度来店してもカウントしません。</div>
+        <div class="muted">※「初めて見かけた人」だけ1回カウント。DBに登録された人は二度とカウントしません。</div>
       </div>
     </section>
   </div>

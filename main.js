@@ -1,4 +1,4 @@
-// === 来客属性カウンター：初回のみカウント（DB照合・再入場/日跨ぎでも加算しない） ===
+// === 来客属性カウンター：新規のみカウント（DB照合・再入場/日跨ぎでも加算しない） ===
 (async function () {
   // ---------- Utils ----------
   const delay = (ms) => new Promise(r => setTimeout(r, ms));
@@ -47,7 +47,7 @@
   await human.load().catch(()=>{});
   statusEl.textContent = 'モデル準備完了';
 
-  // ---------- Daily / Totals (we still display "today" buckets but count only first-ever) ----------
+  // ---------- Daily counts (表示は当日; カウントは生涯一度) ----------
   let currentDay = todayStr();
   const buckets = ['child','10s','20s','30s','40s','50s','60s+','unknown'];
   const blankCounts = () => { const o={}; for(const b of buckets) o[b]={male:0,female:0,unknown:0}; return o; };
@@ -62,71 +62,87 @@
   renderTable();
 
   // ---------- IndexedDB (faces-db / vectors) ----------
-  const DB_NAME='faces-db', STORE='vectors', DB_VER=3;
-  function openDB(){
-    return new Promise((resolve,reject)=>{
-      const req = indexedDB.open(DB_NAME, DB_VER);
+  const DB_NAME='faces-db', STORE='vectors';
+
+  // バージョンを指定せずオープン → ストア無ければ現在版+1で作成（VersionError対策）
+  async function openDBEnsure() {
+    // 1st: open existing (no version)
+    const db = await new Promise((resolve,reject)=>{
+      const req = indexedDB.open(DB_NAME);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror   = () => reject(req.error);
       req.onupgradeneeded = () => {
-        const db = req.result;
-        if (!db.objectStoreNames.contains(STORE)) {
-          const os = db.createObjectStore(STORE, { keyPath:'id', autoIncrement:true });
+        // DB 新規作成時にここでストアも作る
+        const dbu = req.result;
+        if (!dbu.objectStoreNames.contains(STORE)) {
+          const os = dbu.createObjectStore(STORE, { keyPath:'id', autoIncrement:true });
           os.createIndex('tsLast', 'tsLast');
         }
       };
-      req.onsuccess=()=>resolve(req.result);
-      req.onerror =()=>reject(req.error);
+    });
+
+    if (db.objectStoreNames.contains(STORE)) return db;
+
+    // 既存DBにストアが無い → 版を +1 して作成
+    const newVersion = db.version + 1;
+    db.close();
+    return new Promise((resolve,reject)=>{
+      const req2 = indexedDB.open(DB_NAME, newVersion);
+      req2.onupgradeneeded = () => {
+        const dbu = req2.result;
+        if (!dbu.objectStoreNames.contains(STORE)) {
+          const os = dbu.createObjectStore(STORE, { keyPath:'id', autoIncrement:true });
+          os.createIndex('tsLast', 'tsLast');
+        }
+      };
+      req2.onsuccess = () => resolve(req2.result);
+      req2.onerror   = () => reject(req2.error);
     });
   }
-  async function dbGetAll(){
-    const db = await openDB();
-    return new Promise((res,rej)=>{
-      const rq = db.transaction(STORE,'readonly').objectStore(STORE).getAll();
-      rq.onsuccess=()=>res(rq.result||[]);
-      rq.onerror  =()=>rej(rq.error);
+
+  async function withStore(mode, fn) {
+    const db = await openDBEnsure();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(STORE, mode);
+      const os = tx.objectStore(STORE);
+      Promise.resolve(fn(os)).then(val => {
+        tx.oncomplete = () => res(val);
+        tx.onerror    = () => rej(tx.error);
+      }).catch(rej);
     });
   }
-  async function dbGetById(id){
-    const db = await openDB();
-    return new Promise((res,rej)=>{
-      const rq = db.transaction(STORE,'readonly').objectStore(STORE).get(id);
-      rq.onsuccess=()=>res(rq.result||null);
-      rq.onerror  =()=>rej(rq.error);
-    });
-  }
-  async function dbPut(rec){
-    const db = await openDB();
-    return new Promise((res,rej)=>{
-      const tx=db.transaction(STORE,'readwrite');
-      const rq=tx.objectStore(STORE).put(rec);
-      let id=null;
-      rq.onsuccess=()=>{ id = rq.result; };
-      tx.oncomplete=()=>res(id);
-      tx.onerror   =()=>rej(tx.error);
-    });
-  }
-  async function dbUpdate(id, patch){
+
+  const dbGetAll   = () => withStore('readonly',  os => os.getAll());
+  const dbGetById  = (id) => withStore('readonly', os => os.get(id));
+  const dbPut      = (rec) => withStore('readwrite', os => os.put(rec));
+  const dbUpdate   = async (id, patch) => {
     const rec = await dbGetById(id);
     if (!rec) return null;
     return dbPut(Object.assign(rec, patch));
-  }
+  };
 
   // ---------- Embedding / similarity ----------
   const cosSim=(a,b)=>{let d=0,na=0,nb=0,L=Math.min(a.length,b.length);for(let i=0;i<L;i++){const x=a[i],y=b[i];d+=x*y;na+=x*x;nb+=y*y;}return(na&&nb)?d/(Math.sqrt(na)*Math.sqrt(nb)):0;};
-  const normalize = (v)=>{const out=new Float32Array(v.length);let n=0;for(let i=0;i<v.length;i++){n+=v[i]*v[i];}const s=n?1/Math.sqrt(n):1;for(let i=0;i<v.length;i++) out[i]=v[i]*s;return out;};
+  const normalize = (v)=>{const out=new Float32Array(v.length);let n=0;for(let i=0;i<v.length;i++){n+=v[i]*i+v[i]*(1-i);/* noop to avoid DCE */}n=0;for(let i=0;i<v.length;i++){n+=v[i]*v[i];}const s=n?1/Math.sqrt(n):1;for(let i=0;i<v.length;i++) out[i]=v[i]*s;return out;};
   async function faceEmbedding(face){
     const emb = face.embedding || face.descriptor;
     if (!emb || !Array.isArray(emb) || emb.length===0) return null;
     return normalize(new Float32Array(emb));
   }
   async function findNearestInDB(vec, TH=0.998){
-    const all = await dbGetAll();
-    let best=null, bestSim=-1;
-    for(const r of all){
-      if (!r.vec) continue;
-      const s = cosSim(vec, new Float32Array(r.vec));
-      if (s > bestSim){ bestSim=s; best=r; }
+    try{
+      const all = await dbGetAll();
+      let best=null, bestSim=-1;
+      for(const r of all){
+        if (!r.vec) continue;
+        const s = cosSim(vec, new Float32Array(r.vec));
+        if (s > bestSim){ bestSim=s; best=r; }
+      }
+      return (best && bestSim>=TH) ? { rec:best, sim:bestSim } : null;
+    }catch(e){
+      console.warn('DB lookup skipped:', e);
+      return null;
     }
-    return (best && bestSim>=TH) ? { rec:best, sim:bestSim } : null;
   }
 
   // ---------- Tracking ----------
@@ -180,7 +196,7 @@
     tracks.set(nextTrackId,{ id:nextTrackId++, box:det.box, vec:det.vec, lastTs:now, streak:1, counted:false });
   }
 
-  // ---------- Count only when first-ever ----------
+  // ---------- Count only on first-ever ----------
   function addDailyCount(attr){
     dayCounts[attr.bucket][attr.gkey] += 1;
     saveCounts(currentDay, dayCounts);
@@ -188,7 +204,7 @@
   }
   function estimateAttrFromDetections(vec, dets){
     let best=null, bestSim=-1;
-    for(const d of dets){ const s=cosSim(vec,d.vec); if(s>bestSim){bestSim=s; best=d;} }
+    for(const d of dets){ const s=cosSim(vec, d.vec); if(s>bestSim){bestSim=s; best=d;} }
     let bucket='unknown', gkey='unknown';
     if(best){
       const age=best.age;
@@ -210,7 +226,7 @@
     video.srcObject=stream; await video.play();
     overlay.width=video.videoWidth||640; overlay.height=video.videoHeight||480;
     running=true; btnStart.disabled=true; btnStop.disabled=false;
-    statusEl.textContent='実行中（初回のみカウント）';
+    statusEl.textContent='実行中（新規のみカウント）';
     loop();
   }
   function stopCamera(){
@@ -251,29 +267,32 @@
     const unassignedIdx=assignDetectionsToTracks(detections);
     for(const idx of unassignedIdx) createTrack(detections[idx]);
 
-    // 確定トラックだけ判定
+    // 確定トラックだけ判定（DBエラーは握りつぶしてループ継続）
     for(const t of [...tracks.values()]){
       if(t.streak>=4 && !t.counted && t.vec){
-        const attr=estimateAttrFromDetections(t.vec, detections);
-        const nearest=await findNearestInDB(t.vec, 0.998);
+        try{
+          const attr=estimateAttrFromDetections(t.vec, detections);
+          const nearest=await findNearestInDB(t.vec, 0.998);
 
-        if(nearest){
-          // 既知：絶対にカウントしない（メタ情報だけ更新）
-          await dbUpdate(nearest.rec.id, { tsLast: Date.now(), seenCount:(nearest.rec.seenCount||0)+1 });
-          addPersonVec(t.vec);
-        }else{
-          // 新規：DB登録し、**この瞬間だけ** +1
-          const now=Date.now();
-          await dbPut({
-            vec: Array.from(t.vec),
-            tsFirst: now, tsLast: now,
-            seenCount: 1,
-            attrs: attr
-          });
-          addDailyCount(attr);
-          addPersonVec(t.vec);
+          if(nearest){
+            // 既知：絶対にカウントしない（記録更新のみ）
+            await dbUpdate(nearest.rec.id, { tsLast: Date.now(), seenCount:(nearest.rec.seenCount||0)+1 });
+            addPersonVec(t.vec);
+          }else{
+            // 新規：DB登録し、**この瞬間だけ** +1
+            const now=Date.now();
+            await dbPut({
+              vec: Array.from(t.vec),
+              tsFirst: now, tsLast: now,
+              seenCount: 1,
+              attrs: attr
+            });
+            addDailyCount(attr);
+            addPersonVec(t.vec);
+          }
+        }catch(e){
+          console.warn('count step skipped due to DB error:', e);
         }
-
         t.counted = true; // 同一トラックの二重加算防止
       }
     }
