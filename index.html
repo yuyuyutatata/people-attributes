@@ -2,57 +2,51 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>属性カウント（1日ユニーク / DB照合 / 動いても1回）</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>属性カウント（1日1回・DB照合）</title>
   <style>
-    :root { color-scheme: light dark; }
-    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin: 16px; }
-    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    button { padding: 6px 10px; border-radius: 6px; border: 1px solid #8885; background: #fafafa; cursor: pointer; }
-    button:disabled { opacity: .5; cursor: not-allowed; }
-    .danger { background:#ffefef; border-color:#e55; color:#a00; }
-    #overlay { display:block; width: 640px; height: auto; border-radius: 8px; box-shadow: 0 0 0 1px #0001, 0 6px 24px #0002; }
-    table { border-collapse: collapse; width: 640px; margin-top: 16px; }
-    th, td { border: 1px solid #0002; padding: 8px 10px; text-align: center; }
-    th { background: #f6f6f6; }
-    .muted { opacity: .75; font-size: .92rem; }
-    .header { display:flex; align-items:center; justify-content: space-between; width: 640px; margin-top: 8px; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin: 12px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    #overlay { width: 640px; height: 480px; background: #000; display: block; }
+    table { border-collapse: collapse; margin-top: 12px; width: 640px; }
+    th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: center; }
+    thead th { background: #f8f8f8; }
+    .section { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
+    .titleRow { display:flex; align-items:center; gap:12px; margin-top:8px; }
+    .danger { background:#fee; border:1px solid #f99; color:#900; }
+    .danger:hover { background:#fdd; }
+    .note { color:#555; font-size: 12px; }
   </style>
-
-  <!-- Human (UMD) 本体。models/ はリポジトリ直下に配置済み想定 -->
-  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/human@3.6.0/dist/human.js" defer></script>
-  <script src="./main.js" defer></script>
+  <!-- Human 本体（CDN） -->
+  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/dist/human.js"></script>
 </head>
 <body>
-
-  <!-- 操作列 -->
-  <div class="row" style="margin-bottom:8px;">
+  <div class="toolbar">
     <button id="btnStart">カメラ開始</button>
-    <button id="btnStop"  disabled>停止</button>
+    <button id="btnStop" disabled>停止</button>
     <button id="btnCsv">CSVダウンロード</button>
-    <label><input id="ckFront" type="checkbox" /> 前面カメラを使う</label>
-    <span id="status" class="muted">準備中…</span>
+    <label><input id="ckFront" type="checkbox" checked> 前面カメラを使う</label>
+    <span id="status">準備中…</span>
   </div>
 
-  <!-- 映像（canvas） -->
-  <canvas id="overlay" width="640" height="480"></canvas>
+  <div class="section">
+    <canvas id="overlay" width="640" height="480"></canvas>
 
-  <!-- 集計ヘッダ＋リセット -->
-  <div class="header">
-    <h2 style="margin:10px 0;">集計（1日）</h2>
-    <button id="btnResetAll" class="danger" title="DB（顔ベクトル）とローカル集計を全削除">DB含む全リセット</button>
+    <div style="min-width:640px">
+      <div class="titleRow">
+        <h3 style="margin:0">集計（1日）</h3>
+        <button id="btnResetAll" class="danger">DB含む全リセット</button>
+      </div>
+      <table>
+        <thead>
+          <tr><th>年齢層</th><th>男性</th><th>女性</th><th>不確実</th></tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <p class="note">※ 年齢は概ねの推定（例：10s=10代, 20s=20代…）。同一人物は1日に1回のみカウント。</p>
+    </div>
   </div>
 
-  <!-- 集計テーブル -->
-  <table>
-    <thead>
-      <tr><th>年齢層</th><th>男性</th><th>女性</th><th>不確実</th></tr>
-    </thead>
-    <tbody id="tbody"></tbody>
-  </table>
-
-  <p class="muted">※ 年齢は概ねの推定（例：10s=10代, 20s=20代...）。</p>
+  <script src="./main.js"></script>
 </body>
 </html>
