@@ -2,53 +2,57 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>来客属性カウンター（1日1回・DB照合）</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>来客属性カウンター（新規のみ一生に1回）</title>
   <style>
-    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans JP", sans-serif; margin: 0; padding: 16px; }
-    header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-    button, label { font-size: 14px; }
-    #status { margin-left: 8px; color: #555; }
-    #wrap { display: grid; grid-template-columns: minmax(320px, 640px) 1fr; gap: 16px; align-items: start; }
-    #overlay { width: 100%; background: #000; border-radius: 6px; }
-    h2 { margin: 16px 0 8px; display: flex; align-items: center; gap: 8px; }
-    .danger { background: #ffe8ea; color:#b00020; border: 1px solid #ffb6bf; padding: 6px 10px; border-radius: 6px; cursor: pointer; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: center; }
-    th { background: #fafafa; }
-    small { color:#777; }
+    body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";margin:0;padding:16px;background:#fafafa;color:#222}
+    header{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+    button,input[type="checkbox"]{font-size:14px}
+    .wrap{display:grid;grid-template-columns:1fr 420px;gap:16px;align-items:start}
+    #overlay{width:100%;max-width:100%;background:#000;border-radius:8px}
+    .panel{background:#fff;border:1px solid #eee;border-radius:10px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+    .panel h2{margin:0;padding:12px 16px;border-bottom:1px solid #eee;font-size:20px;display:flex;align-items:center;gap:12px}
+    .panel .body{padding:12px 16px}
+    table{width:100%;border-collapse:collapse;font-size:14px}
+    th,td{border:1px solid #eee;padding:8px;text-align:center}
+    th{background:#fafafa}
+    .muted{color:#666;font-size:12px;margin-top:6px}
+    .btn{padding:6px 10px;border:1px solid #ddd;background:#fff;border-radius:6px;cursor:pointer}
+    .btn:disabled{opacity:.6;cursor:not-allowed}
+    .btn-danger{background:#ff6363;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer}
+    #status{margin-left:8px;color:#666}
   </style>
+  <!-- Human.js 本体 -->
+  <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/dist/human.js"></script>
+  <script defer src="./main.js"></script>
 </head>
 <body>
   <header>
-    <button id="btnStart">カメラ開始</button>
-    <button id="btnStop" disabled>停止</button>
-    <button id="btnCsv">CSVダウンロード</button>
-    <label><input type="checkbox" id="ckFront" /> 前面カメラを使う</label>
-    <span id="status">準備中…</span>
+    <button id="btnStart" class="btn">カメラ開始</button>
+    <button id="btnStop"  class="btn" disabled>停止</button>
+    <button id="btnCsv"   class="btn">CSVダウンロード</button>
+    <label style="margin-left:8px"><input type="checkbox" id="ckFront"> 前面カメラを使う</label>
+    <span id="status">モデル準備中…</span>
   </header>
 
-  <div id="wrap">
-    <canvas id="overlay" width="640" height="480"></canvas>
+  <div class="wrap">
+    <canvas id="overlay" width="640" height="480" class="panel"></canvas>
 
-    <section>
+    <section class="panel">
       <h2>
-        集計（1日）
-        <button id="btnResetAll" class="danger" title="DB と集計を初期化して、全員を新規扱いに戻します">DB含む全リセット</button>
+        集計（新規のみ・累積）
+        <button id="btnResetAll" class="btn-danger" style="margin-left:auto">DB含む全リセット</button>
       </h2>
-      <table>
-        <thead>
-          <tr><th>年齢層</th><th>男性</th><th>女性</th><th>不確実</th></tr>
-        </thead>
-        <tbody id="tbody"></tbody>
-      </table>
-      <p><small>※ 年齢は概ねの推定（例：10s=10代, 20s=20代…）。</small></p>
+      <div class="body">
+        <table>
+          <thead>
+            <tr><th>年齢層</th><th>男性</th><th>女性</th><th>不確実</th></tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+        <div class="muted">※ 「初めて見かけた人」だけ1回カウントします。DBに登録された人は二度とカウントされません。</div>
+      </div>
     </section>
   </div>
-
-  <!-- Human v3.3.6（CDN） -->
-  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/dist/human.js"></script>
-  <!-- アプリ本体 -->
-  <script defer src="./main.js"></script>
 </body>
 </html>
