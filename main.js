@@ -64,15 +64,13 @@
   // ---------- IndexedDB (faces-db / vectors) ----------
   const DB_NAME='faces-db', STORE='vectors';
 
-  // バージョンを指定せずオープン → ストア無ければ現在版+1で作成（VersionError対策）
   async function openDBEnsure() {
-    // 1st: open existing (no version)
+    // 既存を開く（バージョン指定なし）
     const db = await new Promise((resolve,reject)=>{
       const req = indexedDB.open(DB_NAME);
       req.onsuccess = () => resolve(req.result);
       req.onerror   = () => reject(req.error);
       req.onupgradeneeded = () => {
-        // DB 新規作成時にここでストアも作る
         const dbu = req.result;
         if (!dbu.objectStoreNames.contains(STORE)) {
           const os = dbu.createObjectStore(STORE, { keyPath:'id', autoIncrement:true });
@@ -80,10 +78,9 @@
         }
       };
     });
-
     if (db.objectStoreNames.contains(STORE)) return db;
 
-    // 既存DBにストアが無い → 版を +1 して作成
+    // ストアが無ければ version+1 で作成
     const newVersion = db.version + 1;
     db.close();
     return new Promise((resolve,reject)=>{
@@ -100,30 +97,45 @@
     });
   }
 
-  async function withStore(mode, fn) {
+  // ★ ここを全面修正：各操作は IDBRequest の onSuccess を待って“値”を返す
+  async function dbGetAll() {
     const db = await openDBEnsure();
     return new Promise((res, rej) => {
-      const tx = db.transaction(STORE, mode);
+      const tx = db.transaction(STORE, 'readonly');
       const os = tx.objectStore(STORE);
-      Promise.resolve(fn(os)).then(val => {
-        tx.oncomplete = () => res(val);
-        tx.onerror    = () => rej(tx.error);
-      }).catch(rej);
+      const rq = os.getAll();
+      rq.onsuccess = () => res(Array.isArray(rq.result) ? rq.result : []);
+      rq.onerror   = () => rej(rq.error);
     });
   }
-
-  const dbGetAll   = () => withStore('readonly',  os => os.getAll());
-  const dbGetById  = (id) => withStore('readonly', os => os.get(id));
-  const dbPut      = (rec) => withStore('readwrite', os => os.put(rec));
-  const dbUpdate   = async (id, patch) => {
-    const rec = await dbGetById(id);
-    if (!rec) return null;
-    return dbPut(Object.assign(rec, patch));
-  };
+  async function dbGetById(id) {
+    const db = await openDBEnsure();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(STORE, 'readonly');
+      const os = tx.objectStore(STORE);
+      const rq = os.get(id);
+      rq.onsuccess = () => res(rq.result || null);
+      rq.onerror   = () => rej(rq.error);
+    });
+  }
+  async function dbPut(rec) {
+    const db = await openDBEnsure();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(STORE, 'readwrite');
+      tx.objectStore(STORE).put(rec);
+      tx.oncomplete = () => res(true);
+      tx.onerror    = () => rej(tx.error);
+    });
+  }
+  async function dbUpdate(id, patch) {
+    const cur = await dbGetById(id);
+    if (!cur) return false;
+    return dbPut(Object.assign(cur, patch));
+  }
 
   // ---------- Embedding / similarity ----------
   const cosSim=(a,b)=>{let d=0,na=0,nb=0,L=Math.min(a.length,b.length);for(let i=0;i<L;i++){const x=a[i],y=b[i];d+=x*y;na+=x*x;nb+=y*y;}return(na&&nb)?d/(Math.sqrt(na)*Math.sqrt(nb)):0;};
-  const normalize = (v)=>{const out=new Float32Array(v.length);let n=0;for(let i=0;i<v.length;i++){n+=v[i]*i+v[i]*(1-i);/* noop to avoid DCE */}n=0;for(let i=0;i<v.length;i++){n+=v[i]*v[i];}const s=n?1/Math.sqrt(n):1;for(let i=0;i<v.length;i++) out[i]=v[i]*s;return out;};
+  const normalize = (v)=>{let n=0;for(let i=0;i<v.length;i++) n+=v[i]*v[i]; const s=n?1/Math.sqrt(n):1; const out=new Float32Array(v.length); for(let i=0;i<v.length;i++) out[i]=v[i]*s; return out;};
   async function faceEmbedding(face){
     const emb = face.embedding || face.descriptor;
     if (!emb || !Array.isArray(emb) || emb.length===0) return null;
@@ -131,7 +143,7 @@
   }
   async function findNearestInDB(vec, TH=0.998){
     try{
-      const all = await dbGetAll();
+      const all = await dbGetAll();        // ← 常に “配列” が返るようになった
       let best=null, bestSim=-1;
       for(const r of all){
         if (!r.vec) continue;
@@ -252,8 +264,8 @@
     const frameArea=overlay.width*overlay.height;
     const faces=(result.face||[]).filter(f=>{
       const [x,y,w,h]=f.box;
-      const okScore=(typeof f.score!=='number')?true:f.score>=0.70;
-      const okArea=(w*h)/frameArea>=0.05;
+      const okScore=(typeof f.score!=='number')?true:f.score>=MIN_FACE_SCORE;
+      const okArea=(w*h)/frameArea>=MIN_AREA_RATIO;
       return okScore && okArea;
     });
 
@@ -267,9 +279,9 @@
     const unassignedIdx=assignDetectionsToTracks(detections);
     for(const idx of unassignedIdx) createTrack(detections[idx]);
 
-    // 確定トラックだけ判定（DBエラーは握りつぶしてループ継続）
+    // 確定トラックだけ判定
     for(const t of [...tracks.values()]){
-      if(t.streak>=4 && !t.counted && t.vec){
+      if(t.streak>=STREAK_N && !t.counted && t.vec){
         try{
           const attr=estimateAttrFromDetections(t.vec, detections);
           const nearest=await findNearestInDB(t.vec, 0.998);
@@ -279,7 +291,7 @@
             await dbUpdate(nearest.rec.id, { tsLast: Date.now(), seenCount:(nearest.rec.seenCount||0)+1 });
             addPersonVec(t.vec);
           }else{
-            // 新規：DB登録し、**この瞬間だけ** +1
+            // 新規：DB登録 → この瞬間だけ +1
             const now=Date.now();
             await dbPut({
               vec: Array.from(t.vec),
