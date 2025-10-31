@@ -6,24 +6,21 @@
   <title>来客属性カウンター（新規のみ・累積）</title>
   <style>
     :root { --accent:#ff6b6b; --ok:#00c48c; --fg:#222; --muted:#777; }
-    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif; margin:16px; color:var(--fg); }
+    body { font-family: system-ui,-apple-system,"Segoe UI",Roboto,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif; margin:16px; color:var(--fg); }
     header { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-    button, label { font-size:14px; }
-    button { padding:6px 10px; border:1px solid #ddd; border-radius:8px; background:#fff; cursor:pointer; }
+    button { padding:6px 10px; border:1px solid #ddd; border-radius:8px; background:#fff; cursor:pointer; font-size:14px; }
     button:disabled { opacity:.5; cursor:not-allowed; }
-    .danger { background: #ffecec; border-color:#ffb5b5; color:#b10000; }
     .ok { background:#eafff6; border-color:#b8f0e0; color:#066; }
+    .danger { background:#ffecec; border-color:#ffb5b5; color:#b10000; }
     .row { display:flex; gap:16px; margin-top:12px; }
     .panel { background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:12px; }
     #stage { width:640px; height:480px; display:block; background:#000; border-radius:12px; }
-    h2 { margin:0 0 8px 0; }
     table { width:420px; border-collapse:collapse; }
-    th, td { border:1px solid #e5e7eb; padding:8px 10px; text-align:center; }
+    th,td { border:1px solid #e5e7eb; padding:8px 10px; text-align:center; }
     th { background:#fafafa; }
     .subnote { color:var(--muted); font-size:12px; margin-top:6px; }
     .status { color:#555; font-size:13px; }
   </style>
-  <!-- Human (UMD) -->
   <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/human/dist/human.js"></script>
 </head>
 <body>
@@ -31,7 +28,7 @@
     <button id="btnStart" class="ok">カメラ開始</button>
     <button id="btnStop">停止</button>
     <button id="btnCsv">CSVダウンロード</button>
-    <label><input type="checkbox" id="ckFront" /> 前面カメラを使う</label>
+    <label><input type="checkbox" id="ckFront"> 前面カメラを使う</label>
     <span id="status" class="status">モデル準備中…</span>
   </header>
 
@@ -39,17 +36,15 @@
     <canvas id="stage" width="640" height="480"></canvas>
 
     <div class="panel">
-      <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
         <h2 style="margin:0;">集計（新規のみ・累積）</h2>
         <button id="btnResetAll" class="danger">DB含む全リセット</button>
       </div>
       <table>
-        <thead>
-          <tr><th>年齢層</th><th>男性</th><th>女性</th><th>不確実</th></tr>
-        </thead>
+        <thead><tr><th>年齢層</th><th>男性</th><th>女性</th><th>不確実</th></tr></thead>
         <tbody id="tbody"></tbody>
       </table>
-      <div class="subnote">※「初めて見かけた人」だけ1回カウント。DBに登録された人は二度とカウントされません。</div>
+      <div class="subnote">※「初めて見かけた人」だけ1回カウント。DBに登録された人は二度とカウントしません。</div>
     </div>
   </div>
 
