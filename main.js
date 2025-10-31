@@ -403,5 +403,79 @@
     }
     return { bucket, gkey };
   }
+  // ===== ここから追記 =====
+
+// 当日分だけ消すのではなく、保存済みの全日カウント/ユニークを削除
+function clearAllDailyStorage() {
+  const keysToDel = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && (k.startsWith('counts:') || k.startsWith('uniq:'))) keysToDel.push(k);
+  }
+  keysToDel.forEach(k => localStorage.removeItem(k));
+}
+
+// IndexedDB を削除（faces-db を丸ごと消す）
+function deleteFacesDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.deleteDatabase('faces-db');
+    req.onsuccess = () => resolve('deleted');
+    req.onerror   = () => reject(req.error);
+    req.onblocked = () => {
+      // 他タブやトランザクションが掴んでいる場合
+      reject(new Error('DB deletion blocked (close other tabs or reload)'));
+    };
+  });
+}
+
+// すべて初期化して「全員を新規扱い」に戻す
+async function resetAll() {
+  // 1) ダブル確認（誤操作防止）
+  if (!confirm('DB（顔ベクトル）と集計・ユニークを全て削除して初期化します。よろしいですか？')) return;
+  if (!confirm('本当に実行しますか？この操作は元に戻せません。')) return;
+
+  try {
+    // 2) カメラ停止（DB削除のブロック回避 & UI安全側）
+    if (running && typeof stopCamera === 'function') stopCamera();
+
+    // 3) ローカルストレージ（counts:/uniq: 全削除）
+    clearAllDailyStorage();
+
+    // 4) IndexedDB の faces-db を削除
+    try {
+      await deleteFacesDB();
+    } catch (e) {
+      // ブロックされた場合はページ再読込を案内
+      alert('DBの削除がブロックされました。他のタブや処理を閉じてから再度お試しください。\n' + e.message);
+    }
+
+    // 5) メモリ状態も初期化（以後は“全員が新規”として扱われる）
+    if (typeof tracks !== 'undefined' && tracks instanceof Map) tracks.clear();
+    if (typeof people !== 'undefined' && Array.isArray(people)) people.length = 0;
+    if (typeof nextTrackId !== 'undefined') nextTrackId = 1;
+
+    // 6) 集計もゼロから（今日の器を作り直す）
+    const today = todayStr();
+    currentDay  = today;
+    dayCounts   = blankCounts();
+    uniqSet     = new Set();
+    saveCounts(currentDay, dayCounts);
+    saveUniq(currentDay, uniqSet);
+    renderTable();
+
+    statusEl.textContent = 'DB・集計を全リセットしました（全員を新規として扱います）';
+    alert('全リセットが完了しました。必要なら「カメラ開始」を押して再開してください。');
+  } catch (err) {
+    console.error(err);
+    alert('全リセット中にエラーが発生しました：' + (err?.message || err));
+  }
+}
+
+// ボタンに割り当て
+const btnResetAll = document.getElementById('btnResetAll');
+if (btnResetAll) btnResetAll.addEventListener('click', resetAll);
+
+// ===== 追記ここまで =====
+
 })();
 

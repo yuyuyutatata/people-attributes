@@ -62,6 +62,13 @@
       position: absolute !important;
       z-index: -9999 !important;
     }
+    .small-btn{
+    margin-left:.5rem; padding:.35rem .6rem; font-size:.9rem;
+    border:1px solid #ccc; border-radius:.4rem; background:#f6f6f6; cursor:pointer;
+  }
+  .small-btn:hover{ background:#eee; }
+  .small-btn.warn{ border-color:#e57373; color:#b71c1c; background:#fdeaea; }
+  .small-btn.warn:hover{ background:#fbdcdc; }
   </style>
 </head>
 
@@ -81,6 +88,7 @@
 
   <div>
     <h3>集計（１日）</h3>
+     <button id="btnResetAll" class="small-btn warn" type="button" title="DBも含めて完全初期化">DB含む全リセット</button>
     <table>
       <thead>
         <tr><th>年齢層</th><th>男性</th><th>女性</th><th>不確実</th></tr>
