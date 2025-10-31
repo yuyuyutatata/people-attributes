@@ -1,4 +1,4 @@
-// === 来客属性カウンター：新規のみカウント（DB照合・再入場/日跨ぎでも加算しない） ===
+// === 来客属性カウンター：新規IDをDBに追加できた時だけ +1（再入場は絶対に加算しない） ===
 (async function () {
   // ---------- Utils ----------
   const delay = (ms) => new Promise(r => setTimeout(r, ms));
@@ -23,10 +23,7 @@
 
   // ---------- Human ----------
   for (let i=0; i<200 && !window.Human; i++) await delay(50);
-  if (!window.Human) {
-    statusEl.textContent = 'Human を読み込めませんでした';
-    btnStart.disabled = true; btnStop.disabled = true; return;
-  }
+  if (!window.Human) { statusEl.textContent='Human を読み込めませんでした'; btnStart.disabled=true; btnStop.disabled=true; return; }
 
   const video = Object.assign(document.createElement('video'), { muted:true, playsInline:true });
   Object.assign(video.style, { display:'none', width:'0', height:'0', position:'absolute', opacity:'0' });
@@ -47,7 +44,7 @@
   await human.load().catch(()=>{});
   statusEl.textContent = 'モデル準備完了';
 
-  // ---------- Daily counts (表示は当日; カウントは生涯一度) ----------
+  // ---------- Daily counts (当日の表示のみ) ----------
   let currentDay = todayStr();
   const buckets = ['child','10s','20s','30s','40s','50s','60s+','unknown'];
   const blankCounts = () => { const o={}; for(const b of buckets) o[b]={male:0,female:0,unknown:0}; return o; };
@@ -65,7 +62,6 @@
   const DB_NAME='faces-db', STORE='vectors';
 
   async function openDBEnsure() {
-    // 既存 open（v未指定）
     const base = await new Promise((resolve,reject)=>{
       const req = indexedDB.open(DB_NAME);
       req.onsuccess = () => resolve(req.result);
@@ -79,8 +75,6 @@
       };
     });
     if (base.objectStoreNames.contains(STORE)) return base;
-
-    // ストアが無ければ version+1 で作成
     const newVersion = base.version + 1; base.close();
     return new Promise((resolve,reject)=>{
       const req2 = indexedDB.open(DB_NAME, newVersion);
@@ -96,7 +90,6 @@
     });
   }
 
-  // 常に“配列/値”を返す安全版
   async function dbGetAll() {
     try{
       const db = await openDBEnsure();
@@ -106,10 +99,7 @@
         rq.onsuccess = () => res(Array.isArray(rq.result) ? rq.result : []);
         rq.onerror   = () => rej(rq.error);
       });
-    }catch(e){
-      console.warn('dbGetAll failed:', e);
-      return []; // 失敗時は空配列（=既知なし扱い）→ 後段で“安全側”ガードあり
-    }
+    }catch(e){ console.warn('dbGetAll failed:', e); return []; }
   }
   async function dbGetById(id) {
     try{
@@ -122,62 +112,53 @@
       });
     }catch(e){ console.warn('dbGetById failed:', e); return null; }
   }
-  async function dbPut(rec) {
+  // ★ 新規専用：add() で autoIncrement の id を取得できた時のみ “新規認定”
+  async function dbAdd(rec) {
     try{
       const db = await openDBEnsure();
       return await new Promise((res, rej) => {
         const tx = db.transaction(STORE, 'readwrite');
-        tx.objectStore(STORE).put(rec);
-        tx.oncomplete = () => res(true);
-        tx.onerror    = () => rej(tx.error);
+        const rq = tx.objectStore(STORE).add(rec);
+        rq.onsuccess = () => res(rq.result ?? null);   // ← 新しく採番された id
+        rq.onerror   = () => { console.warn('dbAdd error:', rq.error); res(null); }; // 失敗時は null
       });
-    }catch(e){ console.warn('dbPut failed:', e); return false; }
+    }catch(e){ console.warn('dbAdd failed:', e); return null; }
   }
   async function dbUpdate(id, patch) {
     const cur = await dbGetById(id);
     if (!cur) return false;
-    return dbPut(Object.assign(cur, patch));
+    try{
+      const db = await openDBEnsure();
+      return await new Promise((res, rej) => {
+        const tx = db.transaction(STORE, 'readwrite');
+        tx.objectStore(STORE).put(Object.assign(cur, patch));
+        tx.oncomplete = () => res(true);
+        tx.onerror    = () => rej(tx.error);
+      });
+    }catch(e){ console.warn('dbUpdate failed:', e); return false; }
   }
 
   // ---------- Embedding / similarity ----------
   const cosSim=(a,b)=>{let d=0,na=0,nb=0,L=Math.min(a.length,b.length);for(let i=0;i<L;i++){const x=a[i],y=b[i];d+=x*y;na+=x*x;nb+=y*y;}return(na&&nb)?d/(Math.sqrt(na)*Math.sqrt(nb)):0;};
-  const normalize = (v)=>{let n=0;for(let i=0;i<v.length;i++) n+=v[i]*v[i]; const s=n?1/Math.sqrt(n):1; const out=new Float32Array(v.length); for(let i=0;i<v.length;i++) out[i]=v[i]*s; return out;};
+  const normalize=(v)=>{let n=0;for(let i=0;i<v.length;i++) n+=v[i]*v[i]; const s=n?1/Math.sqrt(n):1; const out=new Float32Array(v.length); for(let i=0;i<v.length;i++) out[i]=v[i]*s; return out;};
   async function faceEmbedding(face){
     const emb = face.embedding || face.descriptor;
     if (!emb || !Array.isArray(emb) || emb.length===0) return null;
     return normalize(new Float32Array(emb));
   }
-
-  // セッション内ハッシュ（DB遅延での二重加算防止）
-  const sessionHashes = new Set();
-  const quickHash = (vec) => {
-    // 先頭128次元を0.02刻みで量子化 → 文字列キー
-    const L = Math.min(128, vec.length), q = new Array(L);
-    for (let i=0;i<L;i++) q[i] = Math.round(vec[i]/0.02); // 符号含む整数
-    return q.join('.');
-  };
-
-  async function findNearestInDB(vec, TH=0.998){
+  async function findNearestInDB(vec, TH=0.995){  // 少し緩めて再入場でも“既知”になりやすく
     try{
-      const all = await dbGetAll();      // 必ず配列
+      const all = await dbGetAll();
       let best=null, bestSim=-1;
-      for(const r of all){
-        if (!r.vec) continue;
-        const s = cosSim(vec, new Float32Array(r.vec));
-        if (s > bestSim){ bestSim=s; best=r; }
-      }
+      for(const r of all){ if(!r.vec) continue; const s = cosSim(vec, new Float32Array(r.vec)); if(s>bestSim){bestSim=s; best=r;} }
       return (best && bestSim>=TH) ? { rec:best, sim:bestSim } : null;
-    }catch(e){
-      console.warn('findNearestInDB failed:', e);
-      // ★ 安全側：照合失敗時は「カウントしない」方針にするため null の代わりに特別フラグを返す
-      return { dbError:true };
-    }
+    }catch(e){ console.warn('findNearestInDB failed:', e); return { dbError:true }; }
   }
 
   // ---------- Tracking ----------
   const MIN_FACE_SCORE=0.70, MIN_AREA_RATIO=0.05;
   const STREAK_N=4, SIM_MIN=0.98, IOU_MIN=0.20, DIST_MAX_RATIO=0.25;
-  const iou=(b1,b2)=>{const[a,b,c,d]=b1,[e,f,g,h]=b2;const xa=Math.max(a,e),ya=Math.max(b,f);const xb=Math.min(a+c,e+g),yb=Math.min(b+d,f+h);const inter=Math.max(0,xb-xa)*Math.max(0,yb-ya);const uni=c*d+g*h-inter;return uni>0?inter/uni:0;};
+  const iou=(b1,b2)=>{const[a,b,c,d]=b1,[e,f,g,h]=b2;const xa=Math.max(a,e),ya=Math.max(b,f),xb=Math.min(a+c,e+g),yb=Math.min(b+d,f+h);const inter=Math.max(0,xb-xa)*Math.max(0,yb-ya);const uni=c*d+g*h-inter;return uni>0?inter/uni:0;};
   const centerDist=(b1,b2)=>{const c1=[b1[0]+b1[2]/2,b1[1]+b1[3]/2],c2=[b2[0]+b2[2]/2,b2[1]+b2[3]/2];return Math.hypot(c1[0]-c2[0],c1[1]-c2[1]);};
 
   const people=[]; const MEMORY_SIM_TH=0.998;
@@ -225,7 +206,7 @@
     tracks.set(nextTrackId,{ id:nextTrackId++, box:det.box, vec:det.vec, lastTs:now, streak:1, counted:false });
   }
 
-  // ---------- Count only on first-ever ----------
+  // ---------- Count ONLY when a new ID is ADDED ----------
   function addDailyCount(attr){
     dayCounts[attr.bucket][attr.gkey] += 1;
     saveCounts(currentDay, dayCounts);
@@ -255,7 +236,7 @@
     video.srcObject=stream; await video.play();
     overlay.width=video.videoWidth||640; overlay.height=video.videoHeight||480;
     running=true; btnStart.disabled=true; btnStop.disabled=false;
-    statusEl.textContent='実行中（新規のみカウント）';
+    statusEl.textContent='実行中（新規ID追加時のみ +1）';
     loop();
   }
   function stopCamera(){
@@ -281,8 +262,8 @@
     const frameArea=overlay.width*overlay.height;
     const faces=(result.face||[]).filter(f=>{
       const [x,y,w,h]=f.box;
-      const okScore=(typeof f.score!=='number')?true:f.score>=MIN_FACE_SCORE;
-      const okArea=(w*h)/frameArea>=MIN_AREA_RATIO;
+      const okScore=(typeof f.score!=='number')?true:f.score>=0.70;
+      const okArea=(w*h)/frameArea>=0.05;
       return okScore && okArea;
     });
 
@@ -296,34 +277,29 @@
     const unassignedIdx=assignDetectionsToTracks(detections);
     for(const idx of unassignedIdx) createTrack(detections[idx]);
 
-    // 確定トラックだけ判定
+    // 確定トラックだけ
     for(const t of [...tracks.values()]){
-      if(t.streak>=STREAK_N && !t.counted && t.vec){
-        const h = quickHash(t.vec);
-        if (sessionHashes.has(h)) { t.counted = true; continue; }  // セッション重複防止
+      if(t.streak>=4 && !t.counted && t.vec){
         const attr=estimateAttrFromDetections(t.vec, detections);
-
-        const match = await findNearestInDB(t.vec, 0.998);
-        if (match && match.dbError) { // 照合失敗は安全側：一切カウントしない
-          // 何もしない（次フレームでもう一度照合）
+        const match = await findNearestInDB(t.vec, 0.995);
+        if (match && match.dbError) {
+          // 照合失敗は安全側：何もしない（次フレームで再試行）
         } else if (match && match.rec) {
-          // 既知：絶対にカウントしない（最終観測のみ更新）
+          // 既知：絶対にカウントしない
           await dbUpdate(match.rec.id, { tsLast: Date.now(), seenCount:(match.rec.seenCount||0)+1 });
-          sessionHashes.add(h);
           addPersonVec(t.vec);
           t.counted = true;
         } else {
-          // 新規：DB登録 → この瞬間だけ +1
-          const now=Date.now();
-          const ok = await dbPut({ vec:Array.from(t.vec), tsFirst:now, tsLast:now, seenCount:1, attrs:attr });
-          if (ok) {
-            addDailyCount(attr);
-            sessionHashes.add(h);
+          // 新規：DBに add() できた時だけ +1
+          const now = Date.now();
+          const newId = await dbAdd({ vec:Array.from(t.vec), tsFirst:now, tsLast:now, seenCount:1, attrs:attr });
+          if (typeof newId === 'number') {
+            addDailyCount(attr);        // ← ここでだけ表を増やす
             addPersonVec(t.vec);
             t.counted = true;
           } else {
-            // 登録に失敗したら安全側で加算もしない
-            console.warn('dbPut failed; count skipped.');
+            // 追加に失敗 → 表は増やさない
+            console.warn('dbAdd failed; count skipped.');
           }
         }
       }
@@ -345,9 +321,7 @@
   }
 
   // ---------- Events ----------
-  btnStart.addEventListener('click', async ()=>{
-    try{ await startCamera(); }catch(e){ statusEl.textContent='開始失敗: '+e.message; }
-  });
+  btnStart.addEventListener('click', async ()=>{ try{ await startCamera(); }catch(e){ statusEl.textContent='開始失敗: '+e.message; } });
   btnStop .addEventListener('click', stopCamera);
   btnCsv  .addEventListener('click', ()=>{
     const lines=['bucket,male,female,unknown'];
@@ -373,16 +347,16 @@
   }
   async function resetAll(){
     if(!confirm('DB（顔ベクトル）と集計を全て削除して初期化します。よろしいですか？')) return;
-    if(running) stopCamera?.();
+    if(stream) stopCamera?.();
     clearAllDailyStorage();
     try{ await deleteFacesDB(); }catch(e){ alert('DB削除がブロックされました。別タブを閉じてリロードしてください。'); }
-    tracks.clear?.(); people.length=0; nextTrackId=1; sessionHashes.clear();
+    tracks.clear?.(); people.length=0; nextTrackId=1;
     currentDay=todayStr(); dayCounts=blankCounts(); saveCounts(currentDay,dayCounts); renderTable();
     statusEl.textContent='全リセット完了';
   }
   btnResetAll?.addEventListener('click', resetAll);
 
-  // ---------- Init message ----------
+  // ---------- Init ----------
   if (!('mediaDevices' in navigator && 'getUserMedia' in navigator.mediaDevices))
     statusEl.textContent='このブラウザはカメラ未対応';
   else
