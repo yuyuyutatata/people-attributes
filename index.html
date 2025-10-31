@@ -1,101 +1,58 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>属性カウント（オンデバイス・ユニーク集計）</title>
-
-  <!-- faviconエラー回避 -->
-  <link rel="icon" href="data:,">
-
-  <!-- TensorFlow.js & Human の読み込み -->
-  <!-- head 内にこの3行だけ（順番厳守） -->
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
-<script src="./human.js"></script>
-<script defer src="main.js"></script>
-
-
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>属性カウント（1日ユニーク / DB照合 / 動いても1回）</title>
   <style>
-    body {
-      font-family: system-ui, sans-serif;
-      margin: 0;
-      padding: 16px;
-      background: #fff;
-    }
-    header {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      align-items: center;
-      margin-bottom: 10px;
-    }
-    video, canvas {
-      width: 100%;
-      max-width: 480px;
-      border-radius: 8px;
-    }
-    table {
-      border-collapse: collapse;
-      width: 100%;
-      margin-top: 8px;
-    }
-    th, td {
-      border: 1px solid #ccc;
-      padding: 6px 8px;
-      text-align: center;
-    }
-    h3 { margin-top: 0.5em; }
-    #status { color: #444; }
-    #log {
-      font-size: 12px;
-      color: #666;
-      white-space: pre-line;
-      margin-top: 8px;
-    }
-    /* 生のvideoは画面に出さない */
-    #video, video {
-      display: none !important;
-      visibility: hidden !important;
-      opacity: 0 !important;
-      width: 0 !important;
-      height: 0 !important;
-      position: absolute !important;
-      z-index: -9999 !important;
-    }
-    .small-btn{
-    margin-left:.5rem; padding:.35rem .6rem; font-size:.9rem;
-    border:1px solid #ccc; border-radius:.4rem; background:#f6f6f6; cursor:pointer;
-  }
-  .small-btn:hover{ background:#eee; }
-  .small-btn.warn{ border-color:#e57373; color:#b71c1c; background:#fdeaea; }
-  .small-btn.warn:hover{ background:#fbdcdc; }
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin: 16px; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    button { padding: 6px 10px; border-radius: 6px; border: 1px solid #8885; background: #fafafa; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .danger { background:#ffefef; border-color:#e55; color:#a00; }
+    #overlay { display:block; width: 640px; height: auto; border-radius: 8px; box-shadow: 0 0 0 1px #0001, 0 6px 24px #0002; }
+    table { border-collapse: collapse; width: 640px; margin-top: 16px; }
+    th, td { border: 1px solid #0002; padding: 8px 10px; text-align: center; }
+    th { background: #f6f6f6; }
+    .muted { opacity: .75; font-size: .92rem; }
+    .header { display:flex; align-items:center; justify-content: space-between; width: 640px; margin-top: 8px; }
   </style>
+
+  <!-- Human (UMD) 本体。models/ はリポジトリ直下に配置済み想定 -->
+  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/human@3.6.0/dist/human.js" defer></script>
+  <script src="./main.js" defer></script>
 </head>
-
 <body>
-  <header>
+
+  <!-- 操作列 -->
+  <div class="row" style="margin-bottom:8px;">
     <button id="btnStart">カメラ開始</button>
-    <button id="btnStop" disabled>停止</button>
+    <button id="btnStop"  disabled>停止</button>
     <button id="btnCsv">CSVダウンロード</button>
-    <label><input type="checkbox" id="ckFront">前面カメラを使う</label>
-    <span id="status">準備中…</span>
-  </header>
-
-  <div>
-    <canvas id="overlay"></canvas>
-    <div id="log"></div>
+    <label><input id="ckFront" type="checkbox" /> 前面カメラを使う</label>
+    <span id="status" class="muted">準備中…</span>
   </div>
 
-  <div>
-    <h3>集計（１日）</h3>
-     <button id="btnResetAll" class="small-btn warn" type="button" title="DBも含めて完全初期化">DB含む全リセット</button>
-    <table>
-      <thead>
-        <tr><th>年齢層</th><th>男性</th><th>女性</th><th>不確実</th></tr>
-      </thead>
-      <tbody id="tbody"></tbody>
-    </table>
-    <p>※ 年齢は概ねの推定（例：10s=10代, 20s=20代…）。</p>
+  <!-- 映像（canvas） -->
+  <canvas id="overlay" width="640" height="480"></canvas>
+
+  <!-- 集計ヘッダ＋リセット -->
+  <div class="header">
+    <h2 style="margin:10px 0;">集計（1日）</h2>
+    <button id="btnResetAll" class="danger" title="DB（顔ベクトル）とローカル集計を全削除">DB含む全リセット</button>
   </div>
+
+  <!-- 集計テーブル -->
+  <table>
+    <thead>
+      <tr><th>年齢層</th><th>男性</th><th>女性</th><th>不確実</th></tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+
+  <p class="muted">※ 年齢は概ねの推定（例：10s=10代, 20s=20代...）。</p>
 </body>
 </html>
