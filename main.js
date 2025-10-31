@@ -1,4 +1,4 @@
-// === 日次ユニーク集計 + 動いても1回だけ + IndexedDB 照合（安定版） ===
+// === 日次ユニーク集計 + 動いても1回だけ + IndexedDB 照合 ===
 (async function boot() {
   // ---------------- DOM ----------------
   const overlay  = document.getElementById('overlay');
@@ -7,9 +7,9 @@
   const btnStop  = document.getElementById('btnStop');
   const btnCsv   = document.getElementById('btnCsv');
   const ckFront  = document.getElementById('ckFront');
-  const btnResetAll = document.getElementById('btnResetAll');
   const statusEl = document.getElementById('status');
   const tbody    = document.getElementById('tbody');
+  const btnResetAll = document.getElementById('btnResetAll');
 
   btnStop.disabled = true;
   statusEl.textContent = '準備中…';
@@ -21,21 +21,21 @@
     btnStart.disabled = true; btnStop.disabled = true; return;
   }
 
-  // 入力 video（非表示 / autoplay対策）
+  // 入力 video（非表示）
   const video = document.createElement('video');
-  video.autoplay = true; video.muted = true; video.playsInline = true;
   Object.assign(video.style, { display: 'none', width: '0', height: '0', position: 'absolute', opacity: '0' });
   document.body.appendChild(video);
 
   const human = new Human.Human({
-    // モデルはCDNから：ローカル配置不要
     modelBasePath: 'https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/models',
-    cacheSensitivity: 0, // キャッシュ活用
+    cacheSensitivity: 0,
     face: {
       detector: { rotation: true, maxDetected: 3 },
       mesh: false, iris: false,
-      description: { enabled: true },
-      descriptor:  { enabled: true },
+      // ★ embedding/age/gender を有効化（集計・DBに必須）
+      embedding: { enabled: true },
+      age:      { enabled: true },
+      gender:   { enabled: true },
     },
     body: { enabled: false }, hand: { enabled: false }, gesture: { enabled: false },
     filter: { enabled: true, equalization: true },
@@ -54,11 +54,13 @@
   const blankCounts = () => {
     const o = {}; for (const b of buckets) o[b] = { male: 0, female: 0, unknown: 0 }; return o;
   };
+
   const kCounts = d => `counts:${d}`;
   const loadCounts = d => { try { const raw = localStorage.getItem(kCounts(d)); return raw ? JSON.parse(raw) : blankCounts(); } catch { return blankCounts(); } };
   const saveCounts = (d,obj) => localStorage.setItem(kCounts(d), JSON.stringify(obj));
 
   let dayCounts = loadCounts(currentDay);
+
   function renderTable() {
     tbody.innerHTML = buckets.map(b => {
       const c = dayCounts[b];
@@ -68,18 +70,18 @@
   renderTable();
 
   // ---------------- IndexedDB（顔DB） ----------------
-  // faces-db / vectors : { id(AI), vec:number[], tsFirst, tsLast, seenCount, lastCountedDay, attrs? }
-  const DB_NAME = 'faces-db', STORE = 'vectors', DB_VER = 2; // ★ v2 で確実にautoIncrement付keyPathを保証
+  // faces-db / vectors : { id, vec: number[], tsFirst, tsLast, seenCount, lastCountedDay, attrs? }
+  const DB_NAME='faces-db', STORE='vectors', DB_VER=1;
 
   function openDB() {
     return new Promise((resolve, reject) => {
       const req = indexedDB.open(DB_NAME, DB_VER);
       req.onupgradeneeded = () => {
         const db = req.result;
-        // 既存スキーマが不正（keyPathなし等）でも作り直す
-        if (db.objectStoreNames.contains(STORE)) db.deleteObjectStore(STORE);
-        const os = db.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true });
-        os.createIndex('tsLast', 'tsLast');
+        if (!db.objectStoreNames.contains(STORE)) {
+          const os = db.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true });
+          os.createIndex('tsLast', 'tsLast');
+        }
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror   = () => reject(req.error);
@@ -106,7 +108,7 @@
     const db = await openDB();
     return new Promise((res, rej) => {
       const tx = db.transaction(STORE, 'readwrite');
-      tx.objectStore(STORE).put(rec); // id未指定OK（autoIncrement）
+      tx.objectStore(STORE).put(rec);
       tx.oncomplete = () => res();
       tx.onerror    = () => rej(tx.error);
     });
@@ -138,7 +140,11 @@
   await dbMaintenance();
 
   // 近傍検索（コサイン類似度）
-  function cosSim(a, b) { let dot=0, na=0, nb=0, L=Math.min(a.length,b.length); for (let i=0;i<L;i++){ const x=a[i], y=b[i]; dot+=x*y; na+=x*x; nb+=y*y; } return (na&&nb) ? dot/(Math.sqrt(na)*Math.sqrt(nb)) : 0; }
+  function cosSim(a, b) {
+    let dot=0, na=0, nb=0, L=Math.min(a.length,b.length);
+    for (let i=0;i<L;i++){ const x=a[i], y=b[i]; dot+=x*y; na+=x*x; nb+=y*y; }
+    return (na&&nb) ? dot/(Math.sqrt(na)*Math.sqrt(nb)) : 0;
+  }
   async function findNearestInDB(vec, SIM_TH=0.998) {
     const all = await dbGetAll();
     let best=null, bestSim=-1;
@@ -151,25 +157,41 @@
   }
 
   // ---------------- 追尾・一致判定（厳しめ） ----------------
-  const MIN_FACE_SCORE = 0.70;   // 顔スコア閾値（上げると厳しめ）
-  const MIN_AREA_RATIO = 0.05;   // フレームに対する顔面積の最小比
-  const STREAK_N       = 8;      // 連続フレーム数で確定
-  const SIM_MIN        = 0.995;  // トラック更新に使う最小類似度
+  const MIN_FACE_SCORE = 0.70;   // 顔スコア閾値
+  const MIN_AREA_RATIO = 0.05;   // 顔面積の最小比
+  const STREAK_N       = 6;      // 連続フレーム数で確定（8→6に緩和）
+  const SIM_MIN        = 0.995;  // トラック更新の最小類似度
   const IOU_MIN        = 0.35;
   const DIST_MAX_RATIO = 0.15;
 
-  const normalize = v => { const out = new Float32Array(v.length); let n=0; for (let i=0;i<v.length;i++){ const x=v[i]; n+=x*x; } const s = n ? 1/Math.sqrt(n) : 1; for (let i=0;i<v.length;i++) out[i] = v[i]*s; return out; };
-  const iou = (b1,b2)=> { const [x1,y1,w1,h1]=b1,[x2,y2,w2,h2]=b2; const xa=Math.max(x1,x2), ya=Math.max(y1,y2); const xb=Math.min(x1+w1,x2+w2), yb=Math.min(y1+h1,y2+h2); const inter=Math.max(0,xb-xa)*Math.max(0,yb-ya); const uni=w1*h1+w2*h2-inter; return uni>0? inter/uni:0; };
-  const centerDist = (b1,b2)=> { const c1x=b1[0]+b1[2]/2, c1y=b1[1]+b1[3]/2; const c2x=b2[0]+b2[2]/2, c2y=b2[1]+b2[3]/2; return Math.hypot(c1x-c2x, c1y-c2y); };
+  const normalize = v => {
+    const out = new Float32Array(v.length); let n=0;
+    for (let i=0;i<v.length;i++){ const x=v[i]; n+=x*x; }
+    const s = n ? 1/Math.sqrt(n) : 1;
+    for (let i=0;i<v.length;i++) out[i] = v[i]*s;
+    return out;
+  };
+  const iou = (b1,b2)=> {
+    const [x1,y1,w1,h1]=b1,[x2,y2,w2,h2]=b2;
+    const xa=Math.max(x1,x2), ya=Math.max(y1,y2);
+    const xb=Math.min(x1+w1,x2+w2), yb=Math.min(y1+h1,y2+h2);
+    const inter=Math.max(0,xb-xa)*Math.max(0,yb-ya);
+    const uni=w1*h1+w2*h2-inter; return uni>0? inter/uni:0;
+  };
+  const centerDist = (b1,b2)=> {
+    const c1x=b1[0]+b1[2]/2, c1y=b1[1]+b1[3]/2;
+    const c2x=b2[0]+b2[2]/2, c2y=b2[1]+b2[3]/2;
+    return Math.hypot(c1x-c2x, c1y-c2y);
+  };
 
   async function faceEmbedding(face) {
-    const emb = face.descriptor || face.embedding;
-    if (!emb || !Array.isArray(emb)) return null;
+    const emb = face.embedding;         // ★ embedding を使用
+    if (!emb || !Array.isArray(emb) || emb.length === 0) return null;
     return normalize(new Float32Array(emb));
   }
 
   // メモリ内クラスタ（姿勢変化耐性）
-  const people = [];       // [{ vecs: Float32Array[] }]
+  const people = [];                 // [{ vecs: Float32Array[] }]
   const MEMORY_SIM_TH = 0.998;
   const addPersonVec = vec => {
     for (const p of people) {
@@ -230,49 +252,28 @@
   let running=false, stream=null, rafId=null, lastTick=0;
 
   async function startCamera() {
-    const tryStart = async (constraints) => {
-      const s = await navigator.mediaDevices.getUserMedia(constraints);
-      video.srcObject = s;
-      await new Promise((resolve) => {
-        if (video.readyState >= 1) return resolve();
-        video.onloadedmetadata = () => resolve();
-      });
-      try { await video.play(); } catch (_) {}
-      overlay.width  = video.videoWidth  || 640;
-      overlay.height = video.videoHeight || 480;
-      stream = s;
-    };
-
-    try {
-      const facing = ckFront.checked ? 'user' : 'environment';
-      try {
-        await tryStart({ video: { facingMode: { ideal: facing }, width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
-      } catch {
-        await tryStart({ video: true, audio: false }); // フォールバック
-      }
-      running = true; btnStart.disabled = true; btnStop.disabled  = false;
-      statusEl.textContent = '実行中（1日1回・DB照合・動いても1回だけ）';
-      lastTick = 0; rafId = requestAnimationFrame(loop);
-    } catch (e) {
-      statusEl.textContent = 'カメラ開始失敗: ' + e.message;
-    }
+    const facing = ckFront.checked ? 'user' : 'environment';
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: facing }, width: { ideal: 640 }, height: { ideal: 480 } },
+      audio: false
+    });
+    video.srcObject = stream; await video.play();
+    overlay.width  = video.videoWidth  || 640;
+    overlay.height = video.videoHeight || 480;
+    running = true; btnStart.disabled = true; btnStop.disabled = false;
+    statusEl.textContent = '実行中（1日1回・DB照合・動いても1回だけ）';
+    loop();
   }
   function stopCamera() {
-    running = false;
-    if (rafId) cancelAnimationFrame(rafId);
+    running = false; if (rafId) cancelAnimationFrame(rafId);
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
-    ctx.clearRect(0, 0, overlay.width, overlay.height);
-    btnStart.disabled = false; btnStop.disabled  = true;
-    statusEl.textContent = '停止';
+    btnStart.disabled = false; btnStop.disabled = true; statusEl.textContent = '停止';
   }
 
   async function loop(ts) {
     if (!running) return;
 
-    // ビデオ準備待ち
-    if (video.readyState < 2) { rafId = requestAnimationFrame(loop); return; }
-
-    // 日付跨ぎで読み替え
+    // 日付跨ぎでリセット
     const dnow = todayStr();
     if (dnow !== currentDay) {
       currentDay = dnow;
@@ -280,7 +281,7 @@
       renderTable();
     }
 
-    // レート制御（~10fps）
+    // 描画・検出レート制御（~10fps）
     if (ts && ts - lastTick < 100) { rafId = requestAnimationFrame(loop); return; }
     lastTick = ts || performance.now();
 
@@ -318,18 +319,22 @@
     // 確定トラックだけ 1日1回カウント処理
     for (const t of [...tracks.values()]) {
       if (t.streak >= STREAK_N && !t.counted && t.vec) {
+        // 1) DB 既知か？
         const nearest = await findNearestInDB(t.vec, 0.998);
         if (nearest) {
+          // 既知：当日未カウントなら +1 して lastCountedDay を更新
           const last = nearest.rec.lastCountedDay || '';
           if (last !== currentDay) {
             const attr = estimateAttrFromDetections(t.vec, detections);
             dayCounts[attr.bucket][attr.gkey] += 1; saveCounts(currentDay, dayCounts); renderTable();
             await dbUpdate(nearest.rec.id, { tsLast: Date.now(), lastCountedDay: currentDay, seenCount: (nearest.rec.seenCount||0)+1 });
           } else {
+            // 当日すでにカウント済み：最終観測だけ更新
             await dbUpdate(nearest.rec.id, { tsLast: Date.now(), seenCount: (nearest.rec.seenCount||0)+1 });
           }
           addPersonVec(t.vec);
         } else {
+          // 未知：登録して当日カウント +1
           const attr = estimateAttrFromDetections(t.vec, detections);
           await dbPut({
             vec: Array.from(t.vec),
@@ -362,9 +367,11 @@
   }
 
   // ---------------- イベント ----------------
-  btnStart.addEventListener('click', () => startCamera());
-  btnStop .addEventListener('click',  () => stopCamera());
-  btnCsv  .addEventListener('click',  () => {
+  btnStart.addEventListener('click', async () => {
+    try { await startCamera(); } catch (e) { statusEl.textContent = 'カメラ開始失敗: ' + e.message; }
+  });
+  btnStop .addEventListener('click', stopCamera);
+  btnCsv  .addEventListener('click', () => {
     const lines = ['bucket,male,female,unknown'];
     for (const b of buckets) { const c = dayCounts[b]; lines.push([b, c.male, c.female, c.unknown].join(',')); }
     const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
@@ -373,48 +380,50 @@
     a.click(); URL.revokeObjectURL(url);
   });
 
-  // DB含む全リセット
-  btnResetAll.addEventListener('click', async () => {
+  // ---------------- リセット（DB+集計） ----------------
+  function clearAllDailyStorage() {
+    const del = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && (k.startsWith('counts:') || k.startsWith('uniq:'))) del.push(k);
+    }
+    del.forEach(k => localStorage.removeItem(k));
+  }
+  function deleteFacesDB() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.deleteDatabase(DB_NAME);
+      req.onsuccess = () => resolve('deleted');
+      req.onerror   = () => reject(req.error);
+      req.onblocked = () => reject(new Error('DB deletion blocked (close other tabs or reload)'));
+    });
+  }
+  async function resetAll() {
     if (!confirm('DB（顔ベクトル）と集計を全て削除して初期化します。よろしいですか？')) return;
     if (!confirm('本当に実行しますか？この操作は元に戻せません。')) return;
 
     try {
-      if (running) stopCamera();
+      if (running) stopCamera?.();
+      clearAllDailyStorage();
+      try { await deleteFacesDB(); }
+      catch (e) { alert('DBの削除がブロックされました。他のタブや別ウィンドウを閉じてリロードしてください。\n' + (e?.message || e)); }
 
-      // localStorage の counts:/uniq: を全削除（uniq: は将来用）
-      const del = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const k = localStorage.key(i);
-        if (k && (k.startsWith('counts:') || k.startsWith('uniq:'))) del.push(k);
-      }
-      del.forEach(k => localStorage.removeItem(k));
+      tracks.clear?.();
+      if (Array.isArray(people)) people.length = 0;
+      if (typeof nextTrackId !== 'undefined') nextTrackId = 1;
 
-      // faces-db を削除
-      await new Promise((resolve, reject) => {
-        const req = indexedDB.deleteDatabase(DB_NAME);
-        req.onsuccess = () => resolve();
-        req.onerror   = () => reject(req.error);
-        req.onblocked = () => reject(new Error('DB deletion blocked (他タブを閉じてリロード)'));
-      });
-
-      // メモリ状態初期化
-      tracks.clear();
-      people.length = 0;
-      nextTrackId = 1;
-
-      // 今日のカウントをゼロに
       currentDay = todayStr();
       dayCounts  = blankCounts();
       saveCounts(currentDay, dayCounts);
       renderTable();
 
       statusEl.textContent = 'DB・集計を全リセットしました（全員が新規扱いになります）';
-      alert('全リセットが完了しました。必要なら「カメラ開始」で再開してください。');
+      alert('全リセットが完了しました。必要なら「カメラ開始」を押して再開してください。');
     } catch (err) {
       console.error(err);
-      alert('全リセット中にエラー：' + (err?.message || err));
+      alert('全リセット中にエラーが発生しました：' + (err?.message || err));
     }
-  });
+  }
+  btnResetAll?.addEventListener('click', resetAll);
 
   // ---------------- 初期表示 ----------------
   if (!('mediaDevices' in navigator && 'getUserMedia' in navigator.mediaDevices))
