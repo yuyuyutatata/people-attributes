@@ -2,57 +2,57 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>来客属性カウンター（新規のみカウント）</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>来客属性カウンター（新規のみ・累積）</title>
   <style>
-    body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";margin:0;padding:16px;background:#fafafa;color:#222}
-    header{display:flex;gap:8px;align-items:center;margin-bottom:8px}
-    button,input[type="checkbox"]{font-size:14px}
-    .wrap{display:grid;grid-template-columns:1fr 420px;gap:16px;align-items:start}
-    #overlay{width:100%;max-width:100%;background:#000;border-radius:8px}
-    .panel{background:#fff;border:1px solid #eee;border-radius:10px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
-    .panel h2{margin:0;padding:12px 16px;border-bottom:1px solid #eee;font-size:20px;display:flex;align-items:center;gap:12px}
-    .panel .body{padding:12px 16px}
-    table{width:100%;border-collapse:collapse;font-size:14px}
-    th,td{border:1px solid #eee;padding:8px;text-align:center}
-    th{background:#fafafa}
-    .muted{color:#666;font-size:12px;margin-top:6px}
-    .btn{padding:6px 10px;border:1px solid #ddd;background:#fff;border-radius:6px;cursor:pointer}
-    .btn:disabled{opacity:.6;cursor:not-allowed}
-    .btn-danger{background:#ff6363;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer}
-    #status{margin-left:8px;color:#666}
+    :root { --accent:#ff6b6b; --ok:#00c48c; --fg:#222; --muted:#777; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif; margin:16px; color:var(--fg); }
+    header { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    button, label { font-size:14px; }
+    button { padding:6px 10px; border:1px solid #ddd; border-radius:8px; background:#fff; cursor:pointer; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    .danger { background: #ffecec; border-color:#ffb5b5; color:#b10000; }
+    .ok { background:#eafff6; border-color:#b8f0e0; color:#066; }
+    .row { display:flex; gap:16px; margin-top:12px; }
+    .panel { background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:12px; }
+    #stage { width:640px; height:480px; display:block; background:#000; border-radius:12px; }
+    h2 { margin:0 0 8px 0; }
+    table { width:420px; border-collapse:collapse; }
+    th, td { border:1px solid #e5e7eb; padding:8px 10px; text-align:center; }
+    th { background:#fafafa; }
+    .subnote { color:var(--muted); font-size:12px; margin-top:6px; }
+    .status { color:#555; font-size:13px; }
   </style>
-  <!-- Human.js -->
-  <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/dist/human.js"></script>
-  <script defer src="./main.js"></script>
+  <!-- Human (UMD) -->
+  <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/human/dist/human.js"></script>
 </head>
 <body>
-  <header>
-    <button id="btnStart" class="btn">カメラ開始</button>
-    <button id="btnStop"  class="btn" disabled>停止</button>
-    <button id="btnCsv"   class="btn">CSVダウンロード</button>
-    <label style="margin-left:8px"><input type="checkbox" id="ckFront"> 前面カメラを使う</label>
-    <span id="status">モデル準備中…</span>
+  <header class="panel">
+    <button id="btnStart" class="ok">カメラ開始</button>
+    <button id="btnStop">停止</button>
+    <button id="btnCsv">CSVダウンロード</button>
+    <label><input type="checkbox" id="ckFront" /> 前面カメラを使う</label>
+    <span id="status" class="status">モデル準備中…</span>
   </header>
 
-  <div class="wrap">
-    <canvas id="overlay" width="640" height="480" class="panel"></canvas>
+  <div class="row">
+    <canvas id="stage" width="640" height="480"></canvas>
 
-    <section class="panel">
-      <h2>
-        集計（新規のみ・累積）
-        <button id="btnResetAll" class="btn-danger" style="margin-left:auto">DB含む全リセット</button>
-      </h2>
-      <div class="body">
-        <table>
-          <thead>
-            <tr><th>年齢層</th><th>男性</th><th>女性</th><th>不確実</th></tr>
-          </thead>
-          <tbody id="tbody"></tbody>
-        </table>
-        <div class="muted">※「初めて見かけた人」だけ1回カウント。DBに登録された人は二度とカウントしません。</div>
+    <div class="panel">
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+        <h2 style="margin:0;">集計（新規のみ・累積）</h2>
+        <button id="btnResetAll" class="danger">DB含む全リセット</button>
       </div>
-    </section>
+      <table>
+        <thead>
+          <tr><th>年齢層</th><th>男性</th><th>女性</th><th>不確実</th></tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <div class="subnote">※「初めて見かけた人」だけ1回カウント。DBに登録された人は二度とカウントされません。</div>
+    </div>
   </div>
+
+  <script src="./main.js" defer></script>
 </body>
 </html>
