@@ -32,7 +32,7 @@
     face: {
       detector: { rotation: true, maxDetected: 3 },
       mesh: false, iris: false,
-      // ★ embedding/age/gender を有効化（集計・DBに必須）
+      // ★ embedding/age/gender を有効化（必須）
       embedding: { enabled: true },
       age:      { enabled: true },
       gender:   { enabled: true },
@@ -71,22 +71,34 @@
 
   // ---------------- IndexedDB（顔DB） ----------------
   // faces-db / vectors : { id, vec: number[], tsFirst, tsLast, seenCount, lastCountedDay, attrs? }
-  const DB_NAME='faces-db', STORE='vectors', DB_VER=1;
+  const DB_NAME='faces-db', STORE='vectors', DB_VER=3; // 既存より低くならないように大きめ
 
+  // 既存 DB を安全に開き、必要なら自動アップグレード
   function openDB() {
     return new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, DB_VER);
-      req.onupgradeneeded = () => {
+      // まずバージョン未指定で開く（既存バージョン検出）
+      const req = indexedDB.open(DB_NAME);
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
         const db = req.result;
-        if (!db.objectStoreNames.contains(STORE)) {
-          const os = db.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true });
-          os.createIndex('tsLast', 'tsLast');
-        }
+        if (db.objectStoreNames.contains(STORE)) return resolve(db);
+        // ストアがない → バージョンを上げて作成
+        const newVer = Math.max(db.version + 1, DB_VER);
+        db.close();
+        const req2 = indexedDB.open(DB_NAME, newVer);
+        req2.onupgradeneeded = () => {
+          const db2 = req2.result;
+          if (!db2.objectStoreNames.contains(STORE)) {
+            const os = db2.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true });
+            os.createIndex('tsLast', 'tsLast');
+          }
+        };
+        req2.onerror = () => reject(req2.error);
+        req2.onsuccess = () => resolve(req2.result);
       };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror   = () => reject(req.error);
     });
   }
+
   async function dbGetAll() {
     const db = await openDB();
     return new Promise((res, rej) => {
@@ -130,12 +142,16 @@
     });
   }
   async function dbMaintenance() {
-    const THIRTY = 30*24*60*60*1000, MAX_KEEP = 10000;
-    const all = await dbGetAll(); const now = Date.now();
-    const oldIds = all.filter(r => (r.tsLast||r.tsFirst||0) < now-THIRTY).map(r => r.id);
-    await dbDeleteByIds(oldIds);
-    const rest = (await dbGetAll()).sort((a,b)=>(a.tsLast||a.tsFirst)-(b.tsLast||b.tsFirst));
-    if (rest.length > MAX_KEEP) await dbDeleteByIds(rest.slice(0, rest.length-MAX_KEEP).map(r => r.id));
+    try {
+      const THIRTY = 30*24*60*60*1000, MAX_KEEP = 10000;
+      const all = await dbGetAll(); const now = Date.now();
+      const oldIds = all.filter(r => (r.tsLast||r.tsFirst||0) < now-THIRTY).map(r => r.id);
+      await dbDeleteByIds(oldIds);
+      const rest = (await dbGetAll()).sort((a,b)=>(a.tsLast||a.tsFirst)-(b.tsLast||b.tsFirst));
+      if (rest.length > MAX_KEEP) await dbDeleteByIds(rest.slice(0, rest.length-MAX_KEEP).map(r => r.id));
+    } catch(e) {
+      console.warn('DB maintenance skipped:', e?.message || e);
+    }
   }
   await dbMaintenance();
 
@@ -157,10 +173,10 @@
   }
 
   // ---------------- 追尾・一致判定（厳しめ） ----------------
-  const MIN_FACE_SCORE = 0.70;   // 顔スコア閾値
-  const MIN_AREA_RATIO = 0.05;   // 顔面積の最小比
-  const STREAK_N       = 6;      // 連続フレーム数で確定（8→6に緩和）
-  const SIM_MIN        = 0.995;  // トラック更新の最小類似度
+  const MIN_FACE_SCORE = 0.70;
+  const MIN_AREA_RATIO = 0.05;
+  const STREAK_N       = 6;
+  const SIM_MIN        = 0.995;
   const IOU_MIN        = 0.35;
   const DIST_MAX_RATIO = 0.15;
 
@@ -185,7 +201,7 @@
   };
 
   async function faceEmbedding(face) {
-    const emb = face.embedding;         // ★ embedding を使用
+    const emb = face.embedding;
     if (!emb || !Array.isArray(emb) || emb.length === 0) return null;
     return normalize(new Float32Array(emb));
   }
@@ -322,14 +338,12 @@
         // 1) DB 既知か？
         const nearest = await findNearestInDB(t.vec, 0.998);
         if (nearest) {
-          // 既知：当日未カウントなら +1 して lastCountedDay を更新
           const last = nearest.rec.lastCountedDay || '';
           if (last !== currentDay) {
             const attr = estimateAttrFromDetections(t.vec, detections);
             dayCounts[attr.bucket][attr.gkey] += 1; saveCounts(currentDay, dayCounts); renderTable();
             await dbUpdate(nearest.rec.id, { tsLast: Date.now(), lastCountedDay: currentDay, seenCount: (nearest.rec.seenCount||0)+1 });
           } else {
-            // 当日すでにカウント済み：最終観測だけ更新
             await dbUpdate(nearest.rec.id, { tsLast: Date.now(), seenCount: (nearest.rec.seenCount||0)+1 });
           }
           addPersonVec(t.vec);
@@ -347,7 +361,7 @@
           dayCounts[attr.bucket][attr.gkey] += 1; saveCounts(currentDay, dayCounts); renderTable();
           addPersonVec(t.vec);
         }
-        t.counted = true; // このトラックは2度と数えない
+        t.counted = true;
       }
     }
 
